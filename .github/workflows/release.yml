@@ -1,0 +1,108 @@
+name: Release
+
+# Triggered when a version tag is pushed, e.g.:
+#   git tag v0.3.2.9 && git push origin v0.3.2.9
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  # 1. Build the sdist + wheel and verify the tag matches pyproject version.
+  #    Tests run on the pull request (ci.yaml), so a tag only builds and releases.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.13"
+
+      - name: Verify tag matches pyproject version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(uv version --short 2>/dev/null || python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "Tag version:     $TAG"
+          echo "Package version: $PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag ($TAG) does not match pyproject.toml version ($PKG) at $(git rev-parse --short HEAD). Push the version bump first, then move the tag: git push origin :refs/tags/$GITHUB_REF_NAME && git tag -f $GITHUB_REF_NAME <bump-commit> && git push origin $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: uv build --no-sources
+
+      - name: Check distribution metadata
+        run: uvx twine check dist/*
+
+      - name: Fail if a git requirement reached the metadata
+        run: |
+          python - <<'PY'
+          import glob, re, sys, tarfile, zipfile
+
+          texts = {}
+          for whl in glob.glob("dist/*.whl"):
+              z = zipfile.ZipFile(whl)
+              name = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
+              texts[whl] = z.read(name).decode()
+          for sd in glob.glob("dist/*.tar.gz"):
+              t = tarfile.open(sd)
+              name = next(n for n in t.getnames() if n.count("/") == 1 and n.endswith("/PKG-INFO"))
+              texts[sd] = t.extractfile(name).read().decode()
+          if not texts:
+              print("::error::No built artifacts found in dist/")
+              sys.exit(1)
+          bad = False
+          for art, text in texts.items():
+              for line in text.splitlines():
+                  if line.startswith("Requires-Dist:") and re.search(r"git\+|@ git", line):
+                      print(f"::error::{art} has a git requirement: {line}")
+                      bad = True
+          if bad:
+              sys.exit(1)
+          print(f"No git requirements in {len(texts)} artifact(s).")
+          PY
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # 2. Create the GitHub Release with auto-generated notes and attach artifacts.
+  #    PyPI publishing is handled manually (see Makefile: `make publish`).
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # required to create a release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # RELEASE_NOTES.md is the release text; GitHub appends the merged-PR list below it.
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, 'rc') }}
+          files: dist/*
+          fail_on_unmatched_files: true

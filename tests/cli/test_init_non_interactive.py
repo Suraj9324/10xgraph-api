@@ -1,0 +1,410 @@
+"""Non-interactive and dry-run project initialization."""
+
+from __future__ import annotations
+
+import asyncio
+import io
+from pathlib import Path
+
+import pytest
+
+from tenxgraph_api.cli.commands.init import InitCommand
+from tenxgraph_api.cli.core.output import OutputFormatter
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore, RedisCacheStore
+from tenxgraph_api.src.app.core.cache_store.loader import build_cache_store
+from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+
+
+def test_dry_run_does_not_create_target(tmp_path: Path) -> None:
+    target = tmp_path / "preview-agent"
+    stream = io.StringIO()
+    command = InitCommand(OutputFormatter(stream=stream))
+
+    result = command.execute(
+        path=str(target),
+        agent_name="Preview Agent",
+        template="production",
+        auth="jwt",
+        non_interactive=True,
+        dry_run=True,
+    )
+
+    assert result == 0
+    assert not target.exists()
+    assert "Files that would be created" in stream.getvalue()
+    assert "no files were written" in stream.getvalue()
+
+
+def test_non_interactive_quick_start_creates_project(tmp_path: Path) -> None:
+    target = tmp_path / "weather-agent"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+
+    result = command.execute(
+        path=str(target),
+        agent_name="Weather Agent",
+        template="quick-start",
+        non_interactive=True,
+    )
+
+    assert result == 0
+    assert (target / "10xgraph.json").exists()
+    assert (target / "graph" / "agent.py").exists()
+
+
+def test_non_interactive_rejects_production_options_on_quick_start(tmp_path: Path) -> None:
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(tmp_path / "invalid"),
+        template="quick-start",
+        auth="jwt",
+        non_interactive=True,
+    )
+    assert result != 0
+
+
+def _dependencies(target: Path) -> list[str]:
+    import tomllib
+
+    return tomllib.loads((target / "pyproject.toml").read_text())["project"]["dependencies"]
+
+
+def test_production_dependencies_follow_the_answers(tmp_path: Path) -> None:
+    """JWT and Redis add their extras; the Dockerfile installs exactly this list."""
+    target = tmp_path / "secure-agent"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(target),
+        agent_name="Secure Agent",
+        template="production",
+        auth="jwt",
+        storage="postgres",
+        provider="openai",
+        non_interactive=True,
+    )
+    assert result == 0
+    assert _dependencies(target) == [
+        "10xgraph[openai,pg_checkpoint]>=1.0,<2.0",
+        "10xgraph-api[jwt,redis]>=1.0,<2.0",
+    ]
+
+    import json
+
+    config = json.loads((target / "10xgraph.json").read_text())
+    assert config["cache_store"]["type"] == "redis"
+    assert "url" not in config["cache_store"]
+    assert set(config["cache_store"]["rate_limit"]) >= {"enabled", "requests", "window", "by"}
+    assert config["cache_store"]["token_revocation"] is True
+    assert not {"redis", "rate_limit", "token_revocation"} & set(config)
+
+    agent_py = (target / "graph" / "agent.py").read_text()
+    assert 'model="gpt-4o-mini"' in agent_py
+    assert 'provider="openai"' in agent_py
+    assert 'OPENAI_API_KEY=""' in (target / ".env.example").read_text()
+    assert '"OPENAI_API_KEY"' in (target / "tests" / "conftest.py").read_text()
+    assert "$core_requirement" not in (target / "pyproject.toml").read_text()
+    assert "$api_requirement" not in (target / "pyproject.toml").read_text()
+
+
+def test_production_without_jwt_installs_redis_but_not_jwt(tmp_path: Path) -> None:
+    target = tmp_path / "open-agent"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(target),
+        agent_name="Open Agent",
+        template="production",
+        auth="custom",
+        storage="postgres",
+        cache_store="memory",
+        provider="anthropic",
+        non_interactive=True,
+    )
+    assert result == 0
+    assert _dependencies(target) == [
+        "10xgraph[anthropic,pg_checkpoint]>=1.0,<2.0",
+        "10xgraph-api[redis]>=1.0,<2.0",
+    ]
+    assert 'model="claude-sonnet-5-5"' in (target / "graph" / "agent.py").read_text()
+
+
+def test_quick_start_defaults_to_google(tmp_path: Path) -> None:
+    target = tmp_path / "quick-agent"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    assert command.execute(path=str(target), agent_name="Quick", non_interactive=True) == 0
+    agent_py = (target / "graph" / "agent.py").read_text()
+    assert 'model="gemini-2.5-flash"' in agent_py
+    assert 'provider="google"' in agent_py
+    assert 'GOOGLE_API_KEY=""' in (target / ".env.example").read_text()
+
+
+def test_non_interactive_rejects_unknown_provider(tmp_path: Path) -> None:
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(path=str(tmp_path / "x"), provider="mistral", non_interactive=True)
+    assert result != 0
+
+
+def test_websocket_off_by_default_and_not_installed(tmp_path: Path) -> None:
+    import json
+
+    target = tmp_path / "no-ws"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(target), template="production", provider="openai", non_interactive=True
+    )
+    assert result == 0
+    assert _dependencies(target) == ["10xgraph[openai]>=1.0,<2.0", "10xgraph-api[jwt]>=1.0,<2.0"]
+    config = json.loads((target / "10xgraph.json").read_text())
+    assert config["websocket"] == {"enabled": False}
+
+
+def test_websocket_on_adds_the_extra_and_enables_the_routes(tmp_path: Path) -> None:
+    import json
+
+    target = tmp_path / "ws"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(target),
+        template="production",
+        auth="jwt",
+        provider="anthropic",
+        websocket=True,
+        non_interactive=True,
+    )
+    assert result == 0
+    assert _dependencies(target) == [
+        "10xgraph[anthropic]>=1.0,<2.0",
+        "10xgraph-api[jwt,websocket]>=1.0,<2.0",
+    ]
+    config = json.loads((target / "10xgraph.json").read_text())
+    assert config["websocket"] == {"enabled": True}
+
+
+def test_init_scaffolds_a_gitignore_that_keeps_env_out(tmp_path: Path) -> None:
+    target = tmp_path / "agent"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+
+    result = command.execute(path=str(target), template="production", non_interactive=True)
+
+    assert result == 0
+    lines = (target / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert {".env", ".env.*", "!.env.example", "uploads/", "eval_reports/"} <= set(lines)
+    assert lines.index("!.env.example") > lines.index(".env.*")
+
+
+def test_init_adds_secret_patterns_to_an_existing_gitignore(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+
+    result = command.execute(path=str(tmp_path), template="quick-start", non_interactive=True)
+
+    assert result == 0
+    content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert content.startswith("node_modules/\n")
+    assert ".env\n" in content
+
+
+@pytest.mark.parametrize(
+    ("template", "auth", "store", "rate_limit", "revocation"),
+    [
+        ("quick-start", None, None, None, None),
+        ("production", "jwt", "memory", False, False),
+        ("production", "jwt", "memory", True, True),
+        ("production", "jwt", "redis", True, True),
+        ("production", "jwt", "redis", False, False),
+        ("production", "custom", "redis", True, True),
+        ("production", "none", "redis", True, True),
+    ],
+)
+def test_generated_config_loads_through_graph_config(
+    tmp_path: Path,
+    monkeypatch,
+    template: str,
+    auth: str | None,
+    store: str | None,
+    rate_limit: bool | None,
+    revocation: bool | None,
+) -> None:
+    """Every init recipe writes a 10xgraph.json the server parses without a config error."""
+    target = tmp_path / "agent"
+    result = InitCommand(OutputFormatter(stream=io.StringIO())).execute(
+        path=str(target),
+        agent_name="Agent",
+        template=template,
+        auth=auth,
+        cache_store=store,
+        rate_limit=rate_limit,
+        token_revocation=revocation,
+        non_interactive=True,
+    )
+    assert result == 0
+    monkeypatch.chdir(target)  # the config names ".env": never load one from elsewhere
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("JWT_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("JWT_ALGORITHM", "HS256")
+
+    config = GraphConfig(str(target / "10xgraph.json"))
+    assert config.graph_path == "graph.agent:app"
+    config.auth_config()
+    config.websocket  # noqa: B018 - parsing is the check
+    config.runs  # noqa: B018
+    settings = config.cache_store
+    assert settings.type == (store or "memory")
+    assert settings.type_set == (store is not None)
+    assert (config.rate_limit is not None) == bool(rate_limit)
+    assert (config.token_revocation is not None) == bool(revocation and auth != "none")
+    if store == "redis":
+        assert settings.url is None
+        assert settings.expanded_url() == "redis://localhost:6379/0"
+
+    built, source = build_cache_store(config)
+    assert isinstance(built, RedisCacheStore if store == "redis" else InMemoryCacheStore)
+    assert (
+        source
+        == {
+            "redis": "REDIS_URL",
+            "memory": "cache_store.type",
+            None: "cache_store not set",
+        }[store]
+    )
+    asyncio.run(built.aclose())
+
+
+def _written(tmp_path: Path, **kwargs) -> dict:
+    import json
+
+    target = tmp_path / "agent"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(target), agent_name="Agent", template="production", non_interactive=True, **kwargs
+    )
+    assert result == 0
+    return json.loads((target / "10xgraph.json").read_text())
+
+
+def test_cache_store_choices(tmp_path: Path) -> None:
+    assert _written(tmp_path)["cache_store"]["type"] == "memory"
+    assert _written(tmp_path / "p", storage="postgres")["cache_store"]["type"] == "redis"
+    override = _written(tmp_path / "m", storage="postgres", cache_store="memory")
+    assert override["cache_store"]["type"] == "memory"
+    assert "url" not in _written(tmp_path / "r", cache_store="redis")["cache_store"]
+
+
+def test_invalid_cache_store_lists_the_choices(tmp_path: Path) -> None:
+    stream = io.StringIO()
+    result = InitCommand(OutputFormatter(stream=stream)).execute(
+        path=str(tmp_path / "x"),
+        template="production",
+        cache_store="valkey",
+        non_interactive=True,
+    )
+    assert result != 0
+    assert "memory, redis" in stream.getvalue()
+
+
+def test_rate_limit_off_and_token_revocation_off(tmp_path: Path) -> None:
+    store = _written(tmp_path / "a", rate_limit=False, token_revocation=False)["cache_store"]
+    assert store == {"type": "memory"}
+    store = _written(tmp_path / "b", token_revocation=False)["cache_store"]
+    assert "token_revocation" not in store and store["rate_limit"]["enabled"] is True
+
+
+def test_token_revocation_is_ignored_without_auth(tmp_path: Path) -> None:
+    store = _written(tmp_path, auth="none", token_revocation=True)["cache_store"]
+    assert "token_revocation" not in store
+
+
+def test_quick_start_rejects_full_only_flags(tmp_path: Path) -> None:
+    stream = io.StringIO()
+    result = InitCommand(OutputFormatter(stream=stream)).execute(
+        path=str(tmp_path / "q"), cache_store="redis", rate_limit=True, non_interactive=True
+    )
+    assert result != 0
+    assert "--mode full" in stream.getvalue()
+
+
+def test_next_steps_point_to_config_for_every_mode(tmp_path: Path) -> None:
+    texts = {}
+    for mode in ("quick", "full"):
+        stream = io.StringIO()
+        InitCommand(OutputFormatter(stream=stream)).execute(
+            path=str(tmp_path / mode), mode=mode, non_interactive=True
+        )
+        texts[mode] = " ".join(stream.getvalue().split())
+    assert "10xgraph config for more settings" in texts["quick"]
+    assert "Before production" not in texts["quick"]
+    assert "10xgraph config to review auth" in texts["full"]
+    assert "Before production" in texts["full"]
+    assert "10xgraph build" in texts["full"]
+    assert "JWT_SECRET_KEY" in texts["full"]
+    assert "10xgraph skills" in texts["full"]
+
+
+# --- AGENTS.md ---------------------------------------------------------------------------
+
+_SKILL_URL = "https://10xgraph.com/skill.md"
+
+
+def _init(target: Path, **kwargs) -> int:
+    return InitCommand(OutputFormatter(stream=io.StringIO())).execute(
+        path=str(target), agent_name="Agent", non_interactive=True, **kwargs
+    )
+
+
+@pytest.mark.parametrize("mode", ["quick", "full"])
+def test_init_writes_agents_md_inside_the_skills_markers(tmp_path: Path, mode: str) -> None:
+    from tenxgraph_api.cli.commands.skills import BLOCK_END, BLOCK_START
+
+    assert _init(tmp_path, mode=mode) == 0
+    content = (tmp_path / "AGENTS.md").read_bytes()
+    assert content.count(BLOCK_START) == 1
+    assert content.count(BLOCK_END) == 1
+    assert content.startswith(BLOCK_START)
+    assert content.rstrip().endswith(BLOCK_END)
+    assert _SKILL_URL.encode() in content
+    assert b"##[" not in content
+
+
+def test_full_agents_md_lists_tests_and_evals_only_when_generated(tmp_path: Path) -> None:
+    assert _init(tmp_path / "with", mode="full") == 0
+    text = (tmp_path / "with" / "AGENTS.md").read_text(encoding="utf-8")
+    assert "`tests/`" in text and "`evals/`" in text
+    assert "`requirements.txt`" not in text
+
+    assert _init(tmp_path / "without", mode="full", tests=False, evals=False) == 0
+    text = (tmp_path / "without" / "AGENTS.md").read_text(encoding="utf-8")
+    assert "`tests/`" not in text and "`evals/`" not in text
+    assert "`pyproject.toml`" in text
+
+
+def test_skills_replaces_the_init_block_and_keeps_user_text(tmp_path: Path) -> None:
+    from tenxgraph_api.cli.commands.skills import BLOCK_END, BLOCK_START, SkillsCommand
+
+    assert _init(tmp_path, mode="quick") == 0
+    agents_md = tmp_path / "AGENTS.md"
+    # Bytes, not write_text: on Windows write_text turns "\n" into "\r\n".
+    agents_md.write_bytes(b"# My notes\n\n" + agents_md.read_bytes() + b"\nKeep this line.\n")
+
+    skills = SkillsCommand(output=OutputFormatter(stream=io.StringIO()))
+    assert skills.execute(agent="codex", path=str(tmp_path)) == 0
+
+    content = agents_md.read_bytes()
+    assert content.startswith(b"# My notes\n\n")
+    assert content.endswith(b"\nKeep this line.\n")
+    assert content.count(BLOCK_START) == 1
+    assert content.count(BLOCK_END) == 1
+    assert _SKILL_URL.encode() not in content
+    assert b".agents/skills/10xgraph" in content
+
+
+def test_init_refuses_to_overwrite_an_existing_agents_md(tmp_path: Path) -> None:
+    agents_md = tmp_path / "AGENTS.md"
+    agents_md.write_text("my own agent notes\n", encoding="utf-8")
+    stream = io.StringIO()
+
+    result = InitCommand(OutputFormatter(stream=stream)).execute(
+        path=str(tmp_path), mode="quick", non_interactive=True
+    )
+
+    assert result != 0
+    assert "AGENTS.md" in stream.getvalue()
+    assert agents_md.read_text(encoding="utf-8") == "my own agent notes\n"
+    assert not (tmp_path / "10xgraph.json").exists()

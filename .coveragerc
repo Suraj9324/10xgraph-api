@@ -1,0 +1,27 @@
+[run]
+branch = True
+source = tenxgraph_api
+omit =
+    */__init__.py
+    tests/*
+    */tests/*
+    graph/*
+    migrations/*
+    scripts/*
+    venv/*
+    .venv/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    if __name__ == .__main__.
+    @abc.abstractmethod
+    @abstractmethod
+    raise NotImplementedError
+show_missing = True
+
+[paths]
+source =
+    tenxgraph_api
+    */site-packages/tenxgraph_api

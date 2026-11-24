@@ -1,0 +1,91 @@
+"""Per-user cap on graph runs in flight over HTTP (``runs.max_concurrent_per_user``).
+
+Every invoke, stream and AG-UI run costs model calls for as long as it lasts, so one account
+holding many of them open is the cheapest way to exhaust a server. WebSocket runs are already
+bounded by the per-user connection cap; this module bounds the HTTP ones.
+
+A slot is taken before the response starts, so an over-cap request still gets a real 429.
+For a streaming response the slot is held until the stream ends, the client disconnects, or
+the stream object is discarded without ever being iterated.
+
+Slots are leases from :func:`~tenxgraph_api.src.app.core.leases.lease_manager`: shared between
+workers when the cache store is (Redis), otherwise counted per process (size the cap per
+worker).
+"""
+
+from __future__ import annotations
+
+import weakref
+from collections.abc import AsyncIterator
+from typing import Any
+
+from fastapi import HTTPException
+from tenxgraph.core.authz import Identity
+
+from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+from tenxgraph_api.src.app.core.leases import Lease, lease_manager
+from tenxgraph_api.src.app.core.redis_client import identity_key
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+
+
+HTTP_TOO_MANY_REQUESTS = 429
+# Seconds a client is told to wait before it starts another run.
+RUN_CAP_RETRY_AFTER_SECONDS = 5
+
+
+def run_slot_key(user: Identity) -> str:
+    return f"runs:user:{identity_key(user)}"
+
+
+async def acquire_run_slot(user: Identity | None, runs: RunsConfig) -> Lease:
+    """Reserve a run slot for ``user`` or raise 429.
+
+    Requests without an identity (auth off) are not counted: there is no identity
+    to share a budget across, and capping them would cap every caller together.
+    """
+    limit = runs.max_concurrent_per_user
+    if user is None or limit is None:
+        return Lease(None)
+    lease = await lease_manager().acquire(run_slot_key(user), limit)
+    if lease is None:
+        logger.warning(
+            "Concurrent run limit reached for user %s (max=%s)", log_safe(user.user_id), limit
+        )
+        raise HTTPException(
+            status_code=HTTP_TOO_MANY_REQUESTS,
+            detail=(
+                f"Too many runs in progress for this user (limit {limit}). "
+                "Wait for one to finish and retry."
+            ),
+            headers={"Retry-After": str(RUN_CAP_RETRY_AFTER_SECONDS)},
+        )
+    return lease
+
+
+def release_when_done(stream: AsyncIterator[Any], slot: Lease) -> AsyncIterator[Any]:
+    """Wrap a response stream so ``slot`` is released when the stream is finished with.
+
+    Covers a normal end, an error, a client disconnect (the stream is cancelled or closed) and
+    a stream that is dropped before it was ever iterated (garbage collected).
+    """
+
+    async def _stream() -> AsyncIterator[Any]:
+        try:
+            async for item in stream:
+                yield item
+        finally:
+            # Close the run before giving the slot back, so a disconnected client's run is
+            # not left working without a slot until garbage collection reaches it.
+            aclose = getattr(stream, "aclose", None)
+            try:
+                if callable(aclose):
+                    await aclose()
+            except Exception as exc:
+                logger.debug("Closing a released run stream failed: %s", exc)
+            finally:
+                slot.release()
+
+    wrapped = _stream()
+    weakref.finalize(wrapped, slot.release)
+    return wrapped

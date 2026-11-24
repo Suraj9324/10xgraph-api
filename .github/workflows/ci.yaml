@@ -1,0 +1,163 @@
+name: CI
+
+# Pull requests only, like the core repo: main receives code through reviewed PRs,
+# and tags release without re-running the suite.
+on:
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint and type check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --dev --upgrade-package 10xgraph
+
+      - name: Show installed core commit
+        run: |
+          uv pip show 10xgraph
+          uv run python -c "import importlib.metadata as m; print(m.distribution('10xgraph').read_text('direct_url.json'))"
+
+      - name: Run pre-commit (ruff, bandit, hygiene hooks)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+      - name: Type check
+        run: uv run mypy
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Must cover every version advertised in pyproject.toml classifiers.
+        python-version: ["3.12", "3.13", "3.14", "3.15"]
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --dev --upgrade-package 10xgraph
+
+      - name: Show installed core commit
+        run: |
+          uv pip show 10xgraph
+          uv run python -c "import importlib.metadata as m; print(m.distribution('10xgraph').read_text('direct_url.json'))"
+
+      - name: Run tests with coverage
+        run: uv run pytest --integration
+
+      - name: Upload coverage reports to Codecov
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  package:
+    name: Build and verify artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: uv build --no-sources
+
+      - name: Check distribution metadata
+        run: uvx twine check dist/*
+
+      # Extension-based package-data globs silently drop these, which breaks
+      # `10xgraph init` for PyPI installs. Assert against the artifact, not the config.
+      - name: Assert scaffolding templates are present in the wheel
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+
+          wheel = sorted(glob.glob("dist/*.whl"))[-1]
+          names = set(zipfile.ZipFile(wheel).namelist())
+          required = [
+              "tenxgraph_api/py.typed",
+              "tenxgraph_api/cli/templates/dev/.env.example",
+              "tenxgraph_api/cli/templates/prod/.env.example",
+              "tenxgraph_api/cli/templates/prod/.python-version",
+              "tenxgraph_api/cli/templates/prod/pyproject.toml",
+              "tenxgraph_api/cli/templates/prod/.pre-commit-config.yaml",
+          ]
+          missing = [p for p in required if p not in names]
+          if missing:
+              print(f"::error::{wheel} is missing required files:")
+              for p in missing:
+                  print(f"::error::  {p}")
+              sys.exit(1)
+          print(f"{wheel}: all {len(required)} required files present ({len(names)} total).")
+          PY
+
+      - name: Smoke test the installed wheel
+        run: |
+          python -m venv /tmp/smoke
+          # Core from main: the API on this branch may import things not yet on PyPI.
+          /tmp/smoke/bin/pip install --quiet "10xgraph @ git+https://github.com/10xGraph/10xGraph@main"
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          /tmp/smoke/bin/10xgraph version
+          /tmp/smoke/bin/10xgraph --help

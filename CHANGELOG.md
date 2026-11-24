@@ -1,0 +1,1591 @@
+# Changelog
+
+All notable changes to `10xgraph-api` (formerly `10xscale-agentflow-cli`) are documented here.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
+project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## Compatibility policy
+
+- **Nothing public is removed without a deprecation cycle.** A public name (anything
+  exported from `tenxgraph_api`, a CLI command or flag, an HTTP route, or a
+  `10xgraph.json` key) is first marked deprecated in a release, kept working for at
+  least one subsequent minor release, and only then removed in a major release.
+- **Moved modules keep a back-compat shim** re-exporting from the new location for at
+  least one minor release. Import paths do not break silently.
+- **Breaking changes are documented under a `### Breaking` heading** in the release's
+  section, with the migration step spelled out.
+- **From 1.0, `major.minor` is identical across `10xgraph`, `10xgraph-api` and
+  `10xgraph-client`.** Patch numbers move independently. A patch release is only a bug or
+  security fix; any new feature means all three packages release the next `X.Y.0` together, and
+  a package with no changes ships it as "version alignment, no changes".
+- **Breaking changes need a major release (2.0)**, after a deprecation that lasted at least one
+  minor release. The deprecated `agentflow` command, `agentflow_cli` import, `agentflow.json`
+  fallback and `AGENTFLOW_*` environment variable fallbacks are removed in 2.0.
+- Anything under `tenxgraph_api.cli.templates/` is emitted scaffolding, not API; template
+  content can change in any release.
+
+---
+
+## [Unreleased]
+
+### Added
+
+- **Tool permissions in roles and tokens, for core's `ToolGuard`.** A new `tools` resource
+  takes any tool name as its action: `tools:refund`, `tools:mcp.search-v2`, or `tools:*` for
+  every tool. A tool name is 1 to 128 of `A-Z a-z 0-9 _ - .`; an empty name, whitespace, `:`
+  or any other character refuses to boot in a role and is ignored in a token claim. They work
+  in `auth.roles`, in a `permissions_claim`, and token `scope`/`scopes` narrow them (a
+  `tools:refund` scope narrows a `tools:*` grant to that one tool). `*` now also grants
+  `tools:*`; what it grants for the route permissions is unchanged. The default permission
+  set (auth on, no roles and no permissions claim) has no tool permissions, so a tool behind
+  a `ToolGuard` rule is denied until a role or claim grants it. Tool permissions never grant
+  a route, and a route cannot require one. `10xgraph config` suggests `tools:*` in the role
+  editor.
+- **Tool calls in the audit log.** With `audit.enabled`, every server tool call (local or MCP)
+  in a run records a `tool` event with action `tool:call`, `resource` `tool/<name>` and
+  result `success`, `failed` or `denied` (a `ToolGuard` denial, with the policy's reason).
+  A resume that answers a `ToolGuard` approval records `tool:approve`, `allowed` or `denied`
+  (reason `rejected` or `cancelled`), with the identity of the caller who answered. Invoke,
+  stream, WebSocket, AG-UI and `/v1/graph/live` sessions are covered, and each call is
+  recorded once: a call that finished before a pause is not recorded again when the resumed
+  run replays it from the tool ledger. `AuditEvent` gains `thread_id`, `run_id` and
+  `tool_call_id` (null on other events; `run_id` is null in a live session). Tool arguments
+  and results are never recorded.
+
+### Changed
+
+- Requires `injectq>=0.6.1,<0.7`, now listed as a direct dependency. Routes resolve services with `InjectFastAPI` (replacing the deprecated `InjectAPI`), and code inside a request or task finds the app's container with `InjectQ.get_instance()`, which injectq 0.6 makes current for HTTP, WebSocket and TaskIQ. The WebSocket container workaround and `current_container()` helper are removed.
+- Upload file names are cleaned by core's `sanitize_filename`: an empty or `..` name is stored as `unnamed` (it was `file`), and leading dots are removed (`.env` becomes `env`).
+- One rule checks every `"module:attr"` value in `10xgraph.json` (`agent`, `store`, `injectq`, `auth.path`, `cache_store.path`, `thread_name_generator`, `id_generator`, audit sinks), in the server and every CLI command. A value without a colon, with an empty part or with two colons (`"graph.react:"`, `"a:b:c"`) now fails when the config is read, with one message, instead of failing later at import; a dotted attribute (`"mod:obj.attr"`) now works for every key.
+- `10xgraph eval` loads the agent the same way the server does: a factory function is called, and the config folder is on the import path.
+- `10xgraph config` validates `audit`, `observability`, `test` and `evaluation` with the server's own rules, so it accepts what the server accepts (for example `observability.level: "FULL"`); its messages use the server's wording.
+- On invoke, an unknown model name answers 422 before the thread check, as stream already did.
+- The worker closes the same resources as the API server, in the same order (graph, lease manager, cache store, auth, telemetry); before, it did not close the lease manager or the auth class.
+- The server and the worker refuse to start when the graph was built with a different InjectQ container than the server's: the container named by `injectq` in `10xgraph.json`, or the global container when `injectq` is not set. Pass the same container to `StateGraph(container=...)` and to `injectq`, or set neither. Before, the server looked up the graph's checkpointer, background tasks and media store in its own container and did not find them.
+- `current_node` `"start"` and `"end"` are no longer accepted as node names (422 `unknown node`), since core no longer maps those spellings; use `"__start__"` and `"__end__"`.
+
+### Removed
+
+- The `checkpointer` key in `10xgraph.json`. The server never applied it (it only logged a warning); a config that still sets it now refuses to start, and `10xgraph config` reports it as an error, saying to pass the checkpointer to `graph.compile(checkpointer=...)` in the agent module. The config editor's Checkpointer page is gone.
+
+### Fixed
+
+- Every command (`audit`, `build`, `worker`, `scheduler`, `revoke` and `config`, as `dev`, `test` and `eval` already did) now finds `10xgraph.json`, or `agentflow.json`, in the current folder or the nearest parent folder, as the docs say. `build` writes its files and `config` saves next to the config it found.
+- Invoke, stream, WebSocket and AG-UI now give the same error message for the same error. In production, an `UnsupportedMediaInputError` and other client input errors keep their message on every transport (before, stream, WebSocket and AG-UI replaced it with a generic one), and AG-UI no longer sends raw exception text. AG-UI keeps its documented codes (`INVALID_INPUT`, `GRAPH_ERROR`, `AG_UI_ERROR`).
+- On invoke, a database or provider error that the server recognises (no data, an outage, a provider rate limit) now answers 422, 503 with `Retry-After`, or 429, as stream already did, instead of a generic 500.
+- Invoke, fix, stream, WebSocket and AG-UI no longer return provider `raw` payloads or `internal_data` keys other than `error` in messages and state; the thread routes already removed them.
+- Log lines now escape U+2028 and U+2029, so a client value cannot start a new line in text logs. Values are not cut.
+- A WebSocket connection no longer replaces an app's own InjectQ container with the global one during the handshake, so an app built on its own container keeps it on `/v1/graph/ws` and `/v1/graph/live`.
+- A thread resume reads the thread state once before the run (a stream resume read it up to four times), and the media URL and model checks run once per request.
+
+### Security
+
+- Inline media in a run is now checked like an upload before it is stored: the per-user file and size quota, the file signature against the declared type, and the size and pixel limits. Before, a user over the quota could store files by sending them inline. A refused run answers 422 before it starts on invoke and stream, and ends with an error event with the same message on WebSocket and AG-UI; nothing is stored.
+- File signatures and file names are checked by core's `validate_magic_bytes` and `sanitize_filename`, so the API and core apply one rule.
+
+## [1.0.0] - 2026-11-16
+
+The first stable release of `10xgraph-api`. It requires `10xgraph` 1.0 and is released with
+`10xgraph-client` 1.0.0. From this version on the HTTP API, CLI and `10xgraph.json` keys are
+stable: no breaking change before 2.0, and the deprecated `agentflow` names (`agentflow_cli`
+import, `agentflow` command, `agentflow.json`, `AGENTFLOW_*` variables, `agentflow-bearer`
+subprotocol) keep working until then. There was no 1.0.0rc7 of this package, so this section
+lists every change since 1.0.0rc6. Read the Breaking entries before upgrading from an rc.
+
+### Breaking
+
+- **`thread_name_generator` defaults to none.** With the key unset, `null`, `""` or `"none"`, new
+  threads are saved without a name. Set `"random"` to keep the old behaviour (#80).
+- **`runs.state_keys` denies by default.** Clients may set only the state keys it lists, in
+  `initial_state`, `PUT /v1/threads/{id}/state` and AG-UI `state`. Unset, `null` or `[]` allows
+  none, and any other key is a 422 that names the key and points to `runs.state_keys`. Before, an
+  unset value accepted any key. `context` in PUT state is always allowed (it has its own message
+  rules; a configured `state_keys` used to block it too). `runs.config_keys` is unchanged: `null`
+  still accepts any key. `10xgraph config` shows the setting in its own "Client state keys"
+  section. Migration: list every key your clients send, for example
+  `"runs": {"state_keys": ["preferences"]}`.
+- `AIThreadNameGenerator` and `DefaultThreadNameGenerator` are replaced by
+  `RandomThreadNameGenerator`. `ThreadNameGenerator` stays the public base class.
+- `thread_name_generator` must be `none`, `random`, `first_message` or `module:attribute`; any
+  other value is a config error.
+- **`BaseAuth.authenticate` is now async.** Custom auth classes must change `def authenticate` to
+  `async def authenticate`; the server awaits it, so a slow lookup no longer blocks the event loop.
+- **With `cache_store.token_revocation` on, every token needs a `jti`.** A token without a usable
+  `jti` claim (missing, empty, or not a string or int) answers 401 `INVALID_TOKEN` ("Invalid
+  token, jti missing"; audit reason `missing_jti`), on HTTP and WebSocket, whatever auth class
+  produced the claims. Before, it was accepted and could never be revoked by itself. With
+  revocation off, `jti` stays optional. Migration: issue tokens with a `jti` claim, or turn
+  `token_revocation` off.
+
+### Changed
+
+- **`MAX_NESTING_DEPTH` setting.** The deepest nesting of objects and lists accepted in client
+  messages, `initial_state`, `config`, `resume` and `filters` is now a setting (default 64, range 1
+  to 900). The key, item and value count caps stay fixed.
+- The audit log has two more event kinds: `input` (a request refused by a validator with 422, or
+  by the size limit with 413) and `rate_limit` (429, or the limiter backend unavailable).
+- `10xgraph init` writes `10xgraph>=1.0,<2.0` and `10xgraph-api>=1.0,<2.0` in the generated
+  pyproject.toml.
+- `10xgraph init` Production writes `"thread_name_generator": "first_message"` and no longer
+  generates `graph/thread_name_generator.py`. Quick Start leaves the key unset.
+- `10xgraph audit` validates `thread_name_generator`: an invalid value fails, and a custom path
+  whose module file is missing next to `10xgraph.json` warns. No user code is imported.
+- `10xgraph config` offers None, Random name, First message and Custom class for it.
+- The CLI skill reference `callbacks-and-command.md` no longer describes `Command.PARENT` as parent-graph navigation. `Command.graph` is reserved and not acted on, and nested graphs are not supported: build a multi-agent system as one graph with several `Agent` nodes.
+
+### Fixed
+
+- **`meta.is_new_thread` is reported correctly on a continued thread.** A second invoke or stream on the thread id the first call returned reported `is_new_thread: true` with `InMemoryCheckpointer` and `SqliteCheckpointer`, because `aput_thread` in `10xgraph` 1.0.0rc6 returned `True` on every call. The API code is unchanged: it reports the correct value on `10xgraph` 1.0.0, which fixes `aput_thread` and which this release requires. `tests/unit_tests/test_is_new_thread.py` covers invoke and stream over a real graph.
+- **`10xgraph init` Quick setup writes a `requirements.txt`.** It listed no dependencies, so `10xgraph build` warned "No requirements.txt file found" and the Dockerfile installed only `10xgraph-api`, leaving out the provider SDK the agent imports. The file lists `10xgraph[<provider extra>]` and `10xgraph-api` (with the `websocket` extra when chosen), the same requirements the Full `pyproject.toml` uses, and the next steps now say `pip install -r requirements.txt`.
+- **Expected 401s log at WARNING.** A missing, invalid, expired or revoked token logs one WARNING line
+  (method, path, status, code; no token, no traceback) through the same helper as 403, 404 and 429.
+  5xx stays at ERROR.
+- A correctly signed token without the configured tenant claim (`auth.tenant_claims`), or with
+  a malformed roles or permissions claim, answers 401 with error code `INVALID_TOKEN` instead of
+  `HTTPException`. So does a request without a credential when the auth class returns no claims.
+- A token whose `user_id` uses the reserved `__system__` prefix answers 401 `INVALID_TOKEN`
+  instead of `HTTPException`; the message stays "This user id is reserved".
+- `POST /v1/ag-ui` refuses a client tool that has the name of a server tool (local or MCP) with a
+  422 (`tools[2]: 'refund_order' is the name of a server tool`), as `ag_ui.allow_client_tools`
+  documents. A tool that repeats a declared `remote_tools` name is still accepted.
+- A `StorageError` caused by data the database refuses (Postgres SQLSTATE class 22, such as an
+  invalid text value) answers 422 `INVALID_REQUEST_DATA` instead of 500. Lost connections still
+  answer 503 and other storage errors 500.
+  A stream's error chunk carries the same `code` (`INVALID_REQUEST_DATA`) and message.
+- A NUL character or a lone surrogate in client messages or caller state is refused with 422
+  before the run starts. In model replies and tool results it is cleaned instead, so the run
+  does not fail on text the client did not send.
+- An upload on a server without the `media` extra, with `DOCUMENT_HANDLING=extract_text`, answers
+  422 with a message that names the extra. Before, it was a bare 500.
+- `GET /v1/files` answers 501 for reach `tenant` or `all` on a cloud store, which cannot list a
+  bucket, as it does with auth off.
+- `10xgraph dev` and `agentflow dev` fall back to `agentflow.json` again when `10xgraph.json` is
+  missing.
+- `MEDIA_STORAGE_TYPE=cloud` no longer fails with `ImportError: cannot import name 'AwsConfig'`: the config classes are imported from `cloud_storage_manager.storage_schema` and the factory from `cloud_storage_manager.storage_provider`, where `cloud-storage-manager` 0.1.2 defines them.
+- **File uploads: the stored filename is cleaned, and two `file` parts are refused.** `POST /v1/files/upload` keeps only the base name (no path, control or bidi characters, at most 255 characters, `file` if nothing is left), so `info` and list no longer return `../../etc/passwd` or a right-to-left override as sent. A request with more than one `file` part answers 422 "Send exactly one file part" instead of silently keeping the last. `GET /v1/files` on a store that cannot list logs one warning line (no traceback) before its 501.
+
+## [1.0.0rc6] - 2026-11-11
+
+The sixth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc6. Tools and MCP
+servers can call services as the signed-in user, and `10xgraph build` generates the background job
+worker and scheduler.
+
+### Breaking
+
+- **Tracing defaults to `full`.** `OTEL_LEVEL`, `observability.level` in `10xgraph.json` and the
+  fallback for an invalid value are now `full` (was `standard`), so message content and graph state
+  reach the trace backend by default, also in production (the production warning for `full` is
+  gone). Set `OTEL_LEVEL=standard` or `"level": "standard"` (or `spans`) to keep content out. When
+  the graph already has its own observability publisher (Phoenix, LangSmith, Logfire, OTel), the
+  `observability` block is not applied, its level included, and a warning says so.
+- **WebSocket routes no longer accept `?token=`.** `/v1/graph/ws` and `/v1/graph/live` take the
+  bearer from the `Authorization` header or the `10xgraph-bearer` subprotocol only. A token in
+  the URL ended up in access logs, proxy logs and HTTP trace spans. `10xgraph-client` already
+  uses the subprotocol; other clients that put the token in the URL must switch.
+- **`BaseAuth.downstream_credential` is async**, so an override can call an identity provider.
+
+### Changes
+
+- **`10xgraph build` generates the background-job processes.** With a non-`memory` `worker` key in
+  `10xgraph.json`, `docker-compose.yml` gets `worker` and `scheduler` services and `k8s.yaml` gets
+  `<service>-worker` and `<service>-scheduler` Deployments (the scheduler has one replica and
+  `strategy: Recreate`). At a terminal `build` asks where you deploy, whether to run the worker and
+  the scheduler, and whether to overwrite; new flags `--worker/--no-worker` and
+  `--scheduler/--no-scheduler` answer them. It warns when the `jobs` extra for the broker is missing.
+- **`10xgraph init` checks for existing files before writing.** It used to fail on the first existing file and leave a partial scaffold. Now it asks once before overwriting (default No; No writes nothing), or without a terminal stops before any write and lists the files. `--force` skips the question; `--dry-run` marks existing files.
+- **Tools can call services as the signed-in user.** After a request authenticates, the API
+  puts the caller's credential into the run config as `config["credential"]` (a core
+  `UserCredential`: redacted repr, refuses JSON and pickling) for invoke and stream (resume
+  included), `/v1/graph/ws`, `/v1/graph/live` and AG-UI. A tool reads it through a parameter
+  named `credential`, and `ToolNode(mcp_auth=...)` sees it. New hook
+  `BaseAuth.downstream_credential(connection, credential, claims)`: the default returns the
+  bearer token the request carried (header, or on a WebSocket the `10xgraph-bearer` subprotocol); override it when `authenticate` verifies a cookie or an API key, or return
+  None for no credential. `authenticate()` is unchanged. `credential` is a reserved config key
+  (a client value is dropped, and `runs.config_keys` cannot admit it). It is never put in the
+  identity, claims, audit events, logs, thread naming, stop or fix, and never in background
+  tasks (`/v1/tasks` payloads, task status and results carry user data only). Needs `10xgraph`
+  1.0.0rc6 or later.
+
+- **`10xgraph skills` adds always-on project instructions.** Skills load only on demand, so coding
+  agents often never loaded the 10xGraph skill. The Claude target now also writes a 10xGraph
+  section into the project-root `CLAUDE.md`, and the Codex target into `AGENTS.md`. The section
+  tells the agent, and every subagent it starts, to load the skill first, and sets the default
+  shape (prebuilt `ReactAgent`, one agent, business rules in tools, MCP identity through request
+  metadata). It sits between `<!-- 10xgraph:start -->` and `<!-- 10xgraph:end -->`: a missing
+  file is created, an existing section is replaced, otherwise the section is appended. Text
+  outside the markers is never changed, an existing `CLAUDE.md` or `AGENTS.md` does not need
+  `--force`, symlinked files are refused, and the file is written atomically.
+- **Bundled skill: smaller apps by default.** The skill and the Copilot instructions describe
+  10xGraph as infrastructure for production AI agents (multi-agent is one feature), list prebuilt
+  agents before hand-written `StateGraph` loops, add a "Default shape" section, and show how an
+  MCP server reads the signed-in user from `ctx.request_context.meta["user"]` (the `Identity` as
+  JSON) and why it must authenticate the caller. New example: a support agent over MCP with
+  `ReactAgent`. Refresh a project's copy with `10xgraph skills --agent claude --force` (or
+  `--all --force`).
+- **Bundled skill: tool names and the tool results ledger.** The skill and docs now say a tool's name is
+  its function name (`@tool` no longer takes `name`, a breaking change in `10xgraph`), and describe
+  `record_tool_result` and the checkpointer's tool results ledger. Refresh with `10xgraph skills --agent claude --force`.
+
+### Fixes
+
+- **Boot in `10xgraph build` images with a `worker` key.** The tasks router no longer imports the
+  CLI (`typer`, `rich`), which the slim image removes. The server and jobs import without them.
+- **No control-socket error on a read-only root.** The generated gunicorn commands pass
+  `--no-control-socket`, and the Dockerfile installs `gunicorn>=25.1,<27` (the flag is new in 25.1).
+- **An input validator rejection is a 422, not a 500.** `/v1/graph/invoke` answers 422
+  `VALIDATION_ERROR`; stream and WebSocket send an error chunk with that code. Logged at WARNING.
+- **A missing bearer token answers `INVALID_TOKEN`**, not `REVOKED_TOKEN`.
+
+## [1.0.0rc5] - 2026-11-10
+
+The fifth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc5. 10xGraph is
+open-source, self-hosted infrastructure for AI applications, and this release makes the API server
+ready for multi-tenant applications.
+
+### Highlights
+
+- **Roles with reach.** One `auth` object: `method` (`none`, `jwt`, `custom`), `roles` with
+  permissions and a reach of `own`, `tenant` or `all`, `default_role` and `tenant_claims`. Reads,
+  lists, deletes and stop widen with reach; runs and writes stay with the owner. A thread, message,
+  memory, file or run outside the caller's reach answers 404. The `authorization` key is removed.
+- **Tenant isolation.** `tenant_claims` must match the tenant columns declared on the checkpointer
+  and the store (refused in production on a mismatch), and files are tenant-scoped.
+- **Background jobs on TaskIQ.** `from tenxgraph_api.jobs import broker`, `10xgraph worker`,
+  `10xgraph scheduler` and the `/v1/tasks` routes. Jobs run as the caller and check `tasks:trigger`.
+- **Audit log and JSON logs.** A metadata-only audit log (`audit` key; sinks `log`, `publisher` or
+  your own `BaseAuditSink`) and `LOG_FORMAT=json`. The production template turns the audit log on,
+  and `10xgraph build` sets `LOG_FORMAT=json`.
+- **Prometheus metrics** for the API and the job worker through the `metrics` block, by scrape or
+  OTLP push.
+- **Built for teams going through SOC 2 and ISO 27001 audits.** See the control mapping:
+  https://10xgraph.com/docs/production/control-mapping
+
+Breaking changes since rc4 and the upgrade steps are in the docs:
+https://10xgraph.com/docs/project/upgrade-to-1.0
+
+## [1.0.0rc4] - 2026-11-01
+
+The fourth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc4
+(checkpointers have `aping()`). Everything the API shares between workers lives in one
+`BaseCacheStore`, configured by one `cache_store` object in `10xgraph.json`, and the startup
+check no longer refuses to boot over a Redis that nothing configured needs.
+`10xgraph-client` stays at 1.0.0-rc.2.
+
+### Breaking
+
+- Removed, with no deprecation aliases (release candidates): `ConcurrencyLimiter` and
+  `core/concurrency.py`, `TokenRevocationBackend` (with `InMemoryTokenRevocation`,
+  `RedisTokenRevocation`, `build_token_revocation`), `BaseRateLimitBackend` (with
+  `MemoryRateLimitBackend`, `RedisRateLimitBackend` and the rate-limit factory). Run locks and
+  caps, idempotency, the ownership cache, token revocation and rate limiting all use the bound
+  `BaseCacheStore`; implement one to replace Redis.
+- `cache_store` is one object that holds the store and everything it backs:
+  `{"type": "memory" | "redis" | "custom", "url": "${REDIS_URL}", "path": "module:attr",
+  "rate_limit": {...}, "token_revocation": true}`. `url` goes with type `redis` (optional:
+  empty uses the `REDIS_URL` environment variable; `$VAR` / `${VAR}` expanded, an unset variable
+  is a config error) and `path` with type `custom`
+  (a `BaseCacheStore` instance or zero-argument factory). No `cache_store`, or no `type`, is the
+  in-memory store; `rate_limit` and `token_revocation` are off when absent. Unknown keys inside
+  `cache_store`, `rate_limit` and `token_revocation` are config errors listing the valid keys.
+- The top-level `redis`, `rate_limit` and `token_revocation` keys are config errors at load that
+  say where each setting goes; a leftover `rate_limit` can no longer turn rate limiting off
+  without a word. `rate_limit` inside `cache_store` has no `backend` or `redis` key.
+  `token_revocation` is `true`, `false`, `null` or `{"enabled", "token_lifetime", "user_ttl"}`.
+- `REDIS_URL` no longer selects the cache store, and `Settings.REDIS_URL` is gone: the store
+  comes only from `cache_store` (write `"url": "${REDIS_URL}"` to keep reading the variable).
+  This fixes rc3 refusing to boot an in-memory server in production with a stale `REDIS_URL`.
+- `cache_store.type` `"redis"` without the `redis` package refuses to boot with
+  `pip install "10xgraph-api[redis]"`; it never falls back to a per-process store.
+- `GET /health/ready`: the `redis` key in `checks` is renamed `cache` and reports the bound
+  cache store (`{"checkpointer": "ok", "store": "ok", "cache": "ok"}`). Readiness and the
+  startup check only call `aping()` on the bound checkpointer, store and cache store; a
+  component's `readiness_check()` hook and the probing of private checkpointer attributes are
+  gone.
+- `10xgraph init` asks only the agent name, template and AI provider. Production writes the
+  recommended setup: jwt auth, `"authorization": "ownership"`, `"id_generator": "uuid"` and
+  `"cache_store": {"type": "redis", "rate_limit": {...}, "token_revocation": true}` (no `url`:
+  Redis reads `REDIS_URL`); Quick Start writes no `cache_store`. The flags `--auth`,
+  `--cache-store memory|redis`, `--rate-limit/--no-rate-limit`,
+  `--token-revocation/--no-token-revocation` and `--websocket` override parts of it for scripts.
+  The summary lists the written choices and the next steps point to `10xgraph config`.
+- `thread_name_generator` takes `"random"` (the default), `"first_message"`, `"none"` or
+  `"module:attr"`. With the key unset, new threads are now named (randomly) and the name is
+  saved; before, the default name was generated and dropped. `GraphConfig.thread_name_generator_path`
+  is replaced by `GraphConfig.thread_name_generator`.
+
+### Added
+
+- `BaseCacheStore` with `RedisCacheStore` (also Valkey, Dragonfly, KeyDB) and
+  `InMemoryCacheStore`, exported from `tenxgraph_api`. A store has an abstract `aping()` and an
+  optional `describe()` that names its endpoint (never credentials) in logs and startup errors.
+  One INFO line at boot names the store and the config key it came from, for example
+  `Cache store: RedisCacheStore (cache_store.url, localhost:6379)`.
+- A contract suite for custom cache stores in `tenxgraph_api.testing.cache_store_contract`.
+- `id_generator` in `10xgraph.json`: `uuid`, `hex`, `short`, `int`, `bigint`, `timestamp`,
+  `snowflake` (`SnowFlakeIdGenerator`, needs the `snowflakekit` extra and reads the `SNOWFLAKE_*`
+  environment variables) or `"module:attr"` (a `BaseIDGenerator` instance, subclass or
+  zero-argument factory). The API binds it for the loaded graph, so new thread, message and
+  memory ids all come from it. Boot refuses when the graph is also compiled with its own
+  generator (`StateGraph(id_generator=...)`), and when a `PgCheckpointer`'s `id_type` cannot
+  hold its ids. Unset keeps the graph's own generator.
+- `thread_name_generator: "first_message"`: the user's first message, whitespace collapsed,
+  cut to at most 60 characters on a word boundary (`FirstMessageThreadNameGenerator`).
+- `10xgraph config` edits token revocation as a section with `enabled`, `token_lifetime` and
+  `user_ttl`.
+
+### Changed
+
+- The startup check is fatal for the cache store only when a fail-closed feature uses it:
+  `cache_store.token_revocation` on (with auth), or `cache_store.rate_limit` with
+  `fail_open: false`. Otherwise an unreachable cache store is one WARNING (`... unreachable:
+  locks and caps fall back to per process ...`) and the server starts; `/health/ready` reports
+  `cache: fail` and stays 200. Startup errors name each component's class, the config key of
+  the cache store (`cache_store.url`, `cache_store.path ...`) and its `describe()` endpoint.
+  The hint reads "Start the backend, fix its URL, or set STARTUP_CHECKS=false to skip this
+  check."
+- `10xgraph revoke` writes to the cache store `cache_store` selects (`--redis-url` overrides)
+  and refuses with a clear error when that is the in-memory store.
+- Shutdown closes the cache store once, after the graph and after pending lease releases. The
+  authorization backend no longer closes a Redis client.
+- `token_revocation` makes the cache store required (startup check, `/health/ready`) only when
+  auth is on, the same rule the loader uses to enable it.
+- `cache_store` is parsed once per raw value, so its config warnings (such as
+  `trusted_proxy_headers` without `trusted_proxies`) are not repeated per readiness probe.
+- A rate-limit denial stays a 429 when reading the cache store clock for `Retry-After` fails;
+  it no longer turns into an allow or a 503.
+- The in-memory cache store keeps slot and key expiries on the monotonic clock, so a wall clock
+  jump (host suspend, NTP step) no longer expires a held thread lock early. `now()` and
+  `oldest_expiry` are still epoch seconds.
+- `revoke_user` stores the cutoff rounded up to the microsecond, so a token issued at the
+  cutoff itself is always revoked (it was rounded to the nearest).
+- Thread names from `thread_name_generator` get the user's messages first, then the replies
+  (before: the run's output messages only).
+
+---
+
+## [1.0.0rc3] - 2026-10-30
+
+The third release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc3 (stores have
+`aping()`) and is the `1.0.0rc2` code plus the changes below. `10xgraph-client` stays at 1.0.0-rc.2.
+
+### Added
+
+- The server refuses to start while a configured backend is unreachable: the checkpointer's
+  Postgres (query and schema version) and Redis, the store (when it has `aping`/`ping`), the
+  API's Redis (`redis` in `10xgraph.json` or `REDIS_URL`) and the rate limiter's own Redis. It
+  retries with a short backoff for `STARTUP_CHECK_TIMEOUT_SECONDS` (default 30), so services
+  started together can come up in any order, then exits non-zero with each failed component, its
+  `host:port` (no credentials) and the error. This applies in production too, so a broken
+  connection string fails the deploy instead of the first request. `STARTUP_CHECKS=false` skips
+  it. Before, the server started anyway and, with a fail-closed Redis rate limiter, answered every
+  request except `/ping` with 429.
+
+### Changed
+
+- A rate-limiter backend outage with `fail_open: false` now answers `503` with error code
+  `RATE_LIMIT_UNAVAILABLE` and `Retry-After: 5` instead of `429 RATE_LIMIT_EXCEEDED`; 429 is kept
+  for a real limit hit. Clients that retried on 429 now also get 503 during a Redis outage and
+  should retry on it too. A custom backend can signal the same with
+  `RateLimitDecision.backend_unavailable()`; backends that return only allow/deny work unchanged.
+  The Redis backend logs a traceback for the first error of an outage and one line per error
+  after it, instead of a traceback per request.
+
+### Fixed
+
+- The hosted playground can reach a local `10xgraph dev` server: CORS answers the browser's
+  private-network preflight (`Access-Control-Request-Private-Network`) for origins in `ORIGINS`.
+  Before, it answered 400 and the browser reported a CORS error.
+
+## [1.0.0rc2] - 2026-10-30
+
+The second release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc2 and is aligned
+with `10xgraph-client` 1.0.0-rc.2. It is the `1.0.0rc1` code plus the changes below. If you upgrade from
+0.9.x, the `1.0.0rc1` breaking list further down applies to you as well.
+
+### Breaking
+
+- **Ids in paths and bodies must match `^[A-Za-z0-9._:@-]{1,128}$`.** A `thread_id`,
+  `message_id` or memory id that is longer or has other characters gets 422
+  (`VALIDATION_ERROR`). Snowflake integers, UUIDs and the ids the stores return all fit. Ids
+  that start with `__system__` stay reserved.
+- **Nested `initial_state`, `config` and `resume` values deeper than 64 levels get 422**
+  (`VALIDATION_ERROR`). Before, about 5,000 levels passed validation and failed inside the run
+  with `RecursionError`.
+- **Resume errors answer 409 or 422.** A `resume_interrupt_id` or `interrupt_id` that is not the
+  pending interrupt's, a `resume` sent to a thread that is not paused, and a plain new message
+  sent to a thread paused at `interrupt()` return 409. A resume value that fails the
+  interrupt's `response_schema` returns 422. The 409 now comes before the stream starts on
+  `POST /v1/graph/stream` (it was a 200 with an error chunk).
+- **Writes during a run return 409.** `PUT` and `DELETE /v1/threads/{thread_id}/state`,
+  `POST /v1/threads/{thread_id}/messages`, `DELETE` of a thread message, `DELETE` of a thread
+  and `POST /v1/graph/fix` are refused at once with 409 while a run holds the thread. Retry
+  after the run ends or stop it first. They used to be overwritten by the run, or brought a
+  deleted thread back.
+- **Thread delete can return `success=false`.** When file cleanup, trace cleanup or cache
+  eviction failed, `DELETE /v1/threads/{thread_id}` answers `success=false` with
+  `data.cleanup_failed` listing the steps (`files`, `traces`, `cache`) and logs a warning. The
+  thread rows are deleted. Treat `success=false` as "retry the cleanup", not as "thread still
+  there".
+- **`JWT_ALGORITHM` must be on the allowlist.** `HS256`, `HS384`, `HS512`, `RS256`, `RS384`,
+  `RS512`, `ES256`, `ES384`, `ES512`, `PS256`, `PS384`, `PS512` and `EdDSA`. `none`, an empty
+  value or any other value stops startup. Startup also stops when `"auth": "jwt"` is set and
+  PyJWT is missing; before, every request failed with a 500.
+- **The `auth` value must be exactly `"jwt"`.** Before, any string that contained `jwt` was
+  accepted. A value such as `"jwt-custom"` now fails with `Unsupported auth method`.
+- **The `graph:setup` scope is gone.** The setup endpoint no longer exists, and a rule that
+  names the scope guards nothing. Remove it from your authorization config.
+- **Graph validation errors use the code `VALIDATION_ERROR`.** The duplicate
+  `AGENTFLOW_VALIDATION_ERROR` is no longer sent. The client and docs already branch on
+  `VALIDATION_ERROR`.
+- **A run that hits its recursion limit answers 422 (`GRAPH_RECURSION_LIMIT`), not 500.**
+- **`POST /v1/graph/stream` is labelled `application/x-ndjson`** (it was `text/event-stream`
+  while sending NDJSON). Idle streams send a blank keep-alive line every 15 s; NDJSON readers
+  skip it. Proxy rules or clients that matched on `text/event-stream` need updating.
+- **`10xgraph build` refuses `--docker-compose` together with `--k8s`.** The combined image had
+  no start command. Run it once for each target.
+- **Uploads are checked against new default limits** (see Added): images over 50,000,000
+  pixels and PDFs over 10 MB or 500 pages are refused with 413.
+- **The server needs the new dependency floors** (see Upgrade notes) and `10xgraph` 1.0.
+- **AG-UI and `/v1/graph/live` follow `runs.thread_ids` like REST.** Under the default
+  `"server"`, a thread id the server never issued gets 403 on `POST /v1/ag-ui`, and on live an
+  error event with code `not_authorized` and close code 1008. Before, both accepted any id. A
+  blank or `"new"` id, or no id, makes the server create the thread: AG-UI returns the new id in
+  `RUN_STARTED`, and live sends `{"type": "session_started", "thread_id": "<id>"}` as its first
+  server event. Frontends that make their own thread ids (CopilotKit does by default) must set
+  `"runs": {"thread_ids": "client"}` in `10xgraph.json`.
+
+### Upgrade notes
+
+- **Postgres:** `10xgraph` 1.0 runs schema migration v4 on first use. Stop all old pods, run
+  the migration (start one new pod and wait for it to be ready), then start the rest. A
+  rollback needs a database restore. `/health/ready` now fails while the schema version is
+  below the one the code expects, so a pod that cannot create or upgrade the schema stays out
+  of rotation. See the `10xgraph` changelog for the full note.
+- **Dependency minimums:** `python-multipart>=0.0.31`, `starlette>=1.3.1`, `PyJWT>=2.15.0`
+  (the `jwt` extra) and `opentelemetry-api` and `opentelemetry-sdk` `>=1.45.1` (the `otel`
+  extra). `10xgraph>=1.0.0rc2,<2.0` is the core floor in `pyproject.toml`.
+- **Shutdown timing:** the generated Gunicorn command uses a new worker class,
+  `tenxgraph_api.src.app.uvicorn_worker.TenxGraphUvicornWorker`. Regenerate Docker and
+  Kubernetes files with `10xgraph build`, or point your own command at it. Keep Gunicorn
+  `--graceful-timeout` above the sum of the three `SHUTDOWN_*_SECONDS` settings (50 s by
+  default) and the pod grace period above that.
+- **Alerting:** handled client errors log one WARNING line, not an ERROR with a traceback.
+  Alerts that matched ERROR for 4xx responses must match WARNING.
+
+### Added
+
+- **Shutdown settings.** `SHUTDOWN_GRACE_SECONDS` (default 10), `SHUTDOWN_STOP_SECONDS`
+  (default 10) and `SHUTDOWN_TIMEOUT_SECONDS` (default 30). The app lifespan calls
+  `graph.aclose(grace, stop_timeout, timeout)` once with these values, then closes the API's
+  own clients. Runs that are cut are saved INTERRUPTED and the thread resumes with the next
+  request.
+- **`503` while closing.** A run refused because the graph is closing (`GraphClosedError`)
+  answers 503 `SERVICE_UNAVAILABLE` with `Retry-After`. `/health/ready` answers 503
+  (`status: draining`) once shutdown starts.
+- A run refused while the graph is closing sends a stream error chunk or WebSocket frame with
+  `data.code = "SERVICE_UNAVAILABLE"` and `retry_after_seconds`. On a WebSocket the socket then
+  closes with code 1012.
+- **Final chunk on shutdown.** An open HTTP stream cut by a restart ends with an error chunk
+  that has `data.interrupted: true` and a reason, so the client knows to resume the thread.
+- **Terminal chunk on HTTP streams.** A run stream ends with
+  `{"event": "updates", "data": {"status": "done"}}`, as the WebSocket path already did. A
+  client can tell a finished stream from a cut one.
+- **`Retry-After` on 429 and 409.** The run-cap 429 and the busy-thread 409 now carry it, and
+  a queued request whose client has left no longer runs.
+- **Typed server errors.** An unhandled exception returns the JSON error envelope with the
+  request id, the security headers and `Cache-Control: no-store`, not bare text. A database or
+  Redis driver error that cannot connect answers 503 with `Retry-After`, and a model
+  provider's rate limit answers 429 `PROVIDER_RATE_LIMITED` with `Retry-After`. In production a
+  plain `ValueError` still answers 422 with "Invalid input provided."; only errors written for
+  the client (`ClientInputError`) keep their message.
+- **Redis client settings.** `REDIS_SOCKET_TIMEOUT` (5 s), `REDIS_CONNECT_TIMEOUT` (5 s),
+  `REDIS_POOL_TIMEOUT` (5 s), `REDIS_MAX_CONNECTIONS` (50) and `REDIS_HEALTH_CHECK_INTERVAL`
+  (30 s) apply to every Redis client the API opens (run locks and caps, rate limit, token
+  revocation, ownership cache, readiness). `0` turns a timeout off. A Redis that stops
+  answering no longer hangs requests.
+- **`REDIS_KEY_PREFIX`.** A prefix for every key the API writes to Redis, so deployments that
+  share one Redis do not collide. Give the core checkpointer the same value as
+  `redis_key_prefix`.
+- **Media limits.** `MEDIA_MAX_FILES_PER_USER` and `MEDIA_MAX_USER_STORAGE_MB` (both `0`, off),
+  `MEDIA_MAX_IMAGE_PIXELS` (50,000,000), `MEDIA_MAX_PDF_MB` (10) and `MEDIA_MAX_PDF_PAGES`
+  (500; checked before parsing, 413 before the file is stored), `MEDIA_INLINE_MAX_BYTES`
+  (50,000; larger inline base64 media is moved to the media store, `0` turns it off) and
+  `MEDIA_SWEEP_INTERVAL_SECONDS` (3600, `0` turns it off; removes orphan data files left by a
+  crash). The sweeper does not run on the cloud store, which cannot list blobs. The per-user
+  quotas do work on S3 and GCS (see the owner index under Changed).
+- `GET /v1/files` lists the caller's files (`limit` up to 200, `offset`, `has_more`). It works
+  on cloud stores too, for files stored with `10xgraph` 1.0 or later.
+- `has_more`, `offset` and `limit` on the thread and thread-message lists, and `offset`,
+  `has_more` and `next_offset` on the memory list.
+- **Run trace.** The observability route returns a span tree (run, node visits, LLM and tool
+  calls) with inputs, outputs, status, tokens and timings, plus `enabled` and `reason` so a UI
+  can tell tracing off from no runs yet. It is still dev only; the store is not created with
+  `MODE=production`.
+- `realtime_options` in the graph details: the Live init options `/v1/graph/live` honours.
+- **`10xgraph revoke`** revokes one token (`--jti`) or all of a user's tokens (`--user`) in the
+  Redis the server reads (`"token_revocation": "redis"`), with no restart. `10xgraph init
+  --template production` now sets `token_revocation` to `redis`.
+- `10xgraph build` and `10xgraph config` warn when auth is off or the production setup is
+  incomplete (see Changed).
+- `TenxGraphUvicornWorker`, a Gunicorn worker class that ends open streams with the final
+  chunk before the shutdown deadline.
+- The production template validators allow ordinary text (see Fixed) and the template enables
+  the rate limit per user when auth is on.
+- **Idempotency keys (opt-in).** Send `Idempotency-Key` (1 to 255 printable ASCII characters) on
+  `POST /v1/graph/invoke`, `POST /v1/graph/stream` and the AG-UI route, or `idempotency_key` in
+  the WebSocket run frame, and a gateway retry no longer runs the tools twice. Keys are scoped
+  to the user, and a record lives `IDEMPOTENCY_TTL_SECONDS` (default 86400) in Redis when
+  configured, else in the process.
+  - The same key while the first run is going: 409 with `Retry-After`.
+  - After the run finished: invoke returns the stored result, stream replays the final state
+    line plus `done`, and AG-UI and WebSocket answer 409 (their event output is not stored).
+  - The same key with a different body: 422. A malformed key: 422.
+  - A failed run stores nothing, so the key can be retried. A result over 1 MiB is not stored,
+    and the key then answers 409.
+  - A request without the header behaves as before.
+- **JWT key rotation (opt-in).** `JWT_SECRET_KEYS` is a JSON list of `{"kid": ..., "key": ...}`
+  objects or plain strings, checked beside `JWT_SECRET_KEY`, which works unchanged. A token whose
+  header has a `kid` is checked against the keys with that `kid`; a token without one is tried
+  against every key.
+- **`JWT_MAX_TOKEN_AGE_SECONDS` (opt-in).** A token older than this by its `iat` claim gets 401
+  `EXPIRED_TOKEN`, and a token with no `iat` is refused. Off by default.
+- **`session_started` event on `/v1/graph/live`.** The first server event of every live session is
+  `{"type": "session_started", "thread_id": "<id>"}`, with the server-made id when the init frame
+  had none. Reconnect with that id to continue the thread.
+- **`10xgraph eval` writes an HTML report and opens it.** A run now writes the HTML report next
+  to the JSON one in `eval_reports/`, prints both paths, and opens the HTML report in the default
+  browser when it finishes. Pass `--no-open` (or set `evaluation.open_report` to `false` in
+  `10xgraph.json`) to skip it. It is never opened with `--no-report`, `-q`, `--format json` or
+  `jsonl`, `--non-interactive`, when `CI` is set, or when stdout is not a terminal. A failure to
+  open the browser only prints a warning. The playground can still open the JSON report.
+- **Live progress lines for `10xgraph eval`.** Each case prints a muted `running` line, and a
+  user-simulation scenario prints a line per step (simulated user message, agent reply, newly
+  achieved goals, criteria being judged, agent errors) so a long scenario no longer looks
+  frozen. Needs the matching `10xgraph` core release; with an older core the simulation still runs
+  and only the per-step lines are missing. `-q` hides them; `--format jsonl` emits `eval_step`
+  events. `ProgressRun` gains `step(label, message)`.
+
+
+### Changed
+
+- **`10xgraph eval` records the pass-rate gate in the report.** The merged report's metadata
+  carries `pass_rate_threshold` (the `--threshold` value, or 1.0 without one, which is what the
+  exit code uses) and `pass_rate_threshold_source` (`"threshold"` or `"default"`). The JSON
+  report includes both, and the new HTML scorecard (a `10xgraph` core change) uses them for its
+  verdict.
+
+- **The local media store no longer creates `./uploads` at server startup.** The folder is
+  created on the first upload (a `10xgraph` core change).
+- **`10xgraph init --template production` scaffolds the recommended production setup.** Auth
+  defaults to JWT (with ownership authorization) and the rate limiter to Redis, in both the
+  prompts and `--non-interactive` (the rate-limit question is now asked whatever the auth
+  answer). `graph/agent.py` builds a `PgCheckpointer` from `DATABASE_URL` and `REDIS_URL`, with
+  the in-memory checkpointer left as commented-out code for local testing. `.env.example` always
+  has the Postgres and Redis blocks, and `pyproject.toml` depends on `10xgraph[<provider>,pg_checkpoint]`
+  and `10xgraph-api[...redis...]`. Quick-start is unchanged.
+- **Production-readiness warnings.** `10xgraph config` (the editor and the terminal on start-up)
+  and `10xgraph build` now warn, from the JSON alone, when `auth` is off, when `authorization`
+  is `allow_all`, `default` or `none` with auth on, and when `rate_limit` is missing or
+  disabled. They are warnings only: auth off stays allowed and `build` still exits 0. The
+  checks live in `production_readiness_warnings` (`cli/config_editor/validation.py`). The
+  `10xgraph init` next steps now point to `10xgraph config` (both templates) and
+  `10xgraph build` (production); the unused `InitCommand._print_next_steps` was removed.
+- **`10xgraph config` editor redesign.** A sidebar layout with a "Get running" page first, a
+  collapsible sidebar (Ctrl/Cmd+B), search across every setting, defaults shown as values with a
+  per-field reset, and a read-only reference of the related `.env` variables per section plus a
+  server environment page. Schema fixes: `graph_introspection`, `websocket.enabled` and
+  `observability.logfire.console` no longer show a misleading default and offer an explicit
+  "server default" choice; the websocket section no longer seeds `enabled: true`;
+  `runs.timeout` must be greater than 0 and can be set to no limit (`null`); the limit fields
+  offer "Unlimited"; `rate_limit.exclude_paths` is described as extra paths (`/ping` and
+  `/health/ready` are always skipped) and is no longer seeded; `observability.logfire.console: true`
+  is now an error, because Logfire accepts only `false` or a `ConsoleOptions` object.
+- **Concurrency leases and revocation use the Redis clock.** Lease and revocation timing used
+  each pod's own clock, so skew over 60 s could trim another pod's live lease. A cancelled
+  waiter no longer leaves a ghost lease, a Redis error no longer lets a second run start on the
+  thread, and shutdown releases leases before it closes the limiter's Redis client.
+- **Thread-lock responses.** A busy thread answers 409 with `Retry-After`. `/v1/graph/live` and
+  `/v1/graph/ws` now take the thread lock and a run slot like the other run routes, release the
+  lock only after the run generator closes, and stop their child tasks when the handler is
+  cancelled.
+- **WebSocket.** `/v1/graph/ws` checks the token of an idle socket, rate limits invalid frames,
+  and applies a send timeout to slow consumers.
+- **Thread naming.** Thread naming no longer runs inline while a stream holds the
+  lock and run slot, and a failed naming call no longer turns a good run into an error chunk.
+- **Readiness** checks the database schema version, and a Redis blip no longer takes a pod out
+  of rotation by itself.
+- **Boot.** The lifespan calls `asetup()` on the checkpointer at startup and retries on first
+  use if it fails, so a fresh Postgres no longer answers the first request with a 500.
+- **Realtime sessions.** `/v1/graph/live` and `/v1/graph/ws` give each connection its own
+  `LiveAgent`, so concurrent users no longer share one provider session.
+- **Logging.** The API no longer drops core `tenxgraph.*` log records. The log sanitizer
+  redacts `sk-` and `AIza` secrets as well as Bearer and JWT values, keeps UUID ids readable,
+  redacts keys by whole name, and replaces CR and LF. Validation errors on WebSocket and AG-UI
+  no longer echo pydantic `input_value` text, and the access log does not print `?token=`.
+- **`ALLOWED_HOST` is stripped** before the middleware compares it, and `10xgraph dev --host 0.0.0.0` and `--reload` in production log
+  a warning.
+- **Token revocation.** A `revoke_user` cutoff is never replaced by an older one, entries
+  expire (30 days by default), and a token without `iat` is dated from its `exp` when you give
+  the backend your `token_lifetime`. Revocation reads one key at a time, so Redis Cluster no
+  longer fails with CROSSSLOT.
+- **Snowflake ids.** The generator reads its settings from the environment when you pass none,
+  so workers no longer all share one node and worker id, and a partial configuration no longer
+  raises on the first id.
+- **Kubernetes manifest.** `ORIGINS` and `ALLOWED_HOST` entries no longer override the values in
+  the `envFrom` Secret.
+- **Rate limit.** `exclude_paths` in the production template names `/redocs`, the real path.
+- **`10xgraph audit`** has a seventh check, "Security posture", that warns about the same
+  production-readiness gaps as `10xgraph build` (auth, authorization, rate limit, token
+  revocation). It only warns.
+- **Media delete.** Deleting a file or a thread removes the extracted text from the 24 h cache,
+  and thread delete releases media linked through `PUT .../state`.
+- **Uploads.** A file's thread links are updated on every route that accepts media, and the
+  startup temp-cache cleanup now runs against the media store.
+- **Request size caps.** Client dicts and lists (`config`, `initial_state`, `resume`,
+  `metadata`, `filters` and the store and checkpointer request bodies, and WebSocket frames) are
+  limited to 1000 keys per object, 10000 items per list and 200000 values in all, beside the
+  64-level depth cap. A larger body gets 422 (`VALIDATION_ERROR`). The caps are fixed and have
+  no setting.
+- **The id rule covers more inputs.** The WebSocket `config.thread_id`, the thread id in the
+  live init frame and the AG-UI `threadId` must match the id pattern from Breaking. An invalid
+  one gets 422 or an error frame with `VALIDATION_ERROR`.
+- **Uploads are authenticated before the body is parsed,** so an unauthenticated caller can no
+  longer make the server spool a multipart body. An upload with no `file` part answers 422.
+- **Cloud media (S3, GCS).** `GET /v1/files`, the per-user quotas and release on thread delete
+  now work through the per-owner index of `10xgraph` 1.0. Files stored before 1.0, or with no
+  owner, are not in the index. Listing with auth off still answers 501 on a cloud store.
+- **A stored thread at a missing node answers 409** (`GRAPH_NODE_MISSING_001`), and stored state
+  from a newer `10xgraph` answers 500 with `STATE_FORMAT_001` and a message to upgrade. Before,
+  both were a generic 500.
+
+### Removed
+
+- **`IS_DEBUG` is removed.** Debug now follows `MODE`: on in development, off in production. A
+  leftover `IS_DEBUG` in the environment is ignored and logs one WARNING at startup; delete it.
+  The unused `IS_PRODUCTION` constant in `settings.py` is gone too.
+- Removed the `/v1/evals/runs` endpoints; eval reports are JSON files opened in the playground.
+  `10xgraph eval` now writes only the JSON report and no longer has `--open`.
+- The `graph:setup` scope is removed from the config editor and the docs (see Breaking).
+
+### Fixed
+
+- **Stop and shutdown reach a REST stream after its first chunk.** `end_on_shutdown` ran each
+  step of the stream in a new task with a fresh context, so the graph's current run (which
+  carries the in-process stop flag and the shutdown reason) was lost after the first chunk. All
+  steps now share one context.
+- **Template weather tool answers per city.** The weather tool in the `dev` and `prod` templates
+  always said "sunny", so an eval goal such as "which city has nicer weather" could never pass.
+  It now returns fixed weather for a few known cities and a stable answer for any other name
+  (no randomness), with the same signature and reply format.
+- **Current Gemini Live model in the defaults.** The `websocket.realtime_models` default and the
+  config editor placeholder named `gemini-2.5-flash-live`, which is not a current model; they
+  now name `gemini-3.8-live`.
+- **A disconnected stream frees its thread only after the run is saved.** `end_on_shutdown`
+  and the `runs.timeout` wrapper cancelled the run task and then awaited it, which under
+  Starlette's cancel scope cancelled the run on every loop turn and returned before core's
+  cancel save finished, so the thread lock was free while the old run still wrote. They now
+  cancel once and wait (bounded, 15 s) in a shielded scope. Needs `10xgraph` 1.0.
+- **`10xgraph eval` reports carry each case's expectations.** The report's case results now
+  include `expected` (response, tool calls, node order, input). For a user simulation, `input`
+  is the starting prompt and `response` is the goals joined with `; `. Needs `10xgraph` 1.0.
+- **The `init` eval templates check what they declare and can pass.** `weather_agents_eval.py`
+  now scores the expected response (ROUGE-1, no LLM), the expected node order and the tool
+  calls; the greeting case no longer expects the placeholder `assistant`.
+  `user_simulator_eval.py` replaces the flight booking scenario, which a weather-only agent
+  could never complete, with a two-city weather comparison.
+- **`10xgraph eval` showed `0.00s` for user-simulation scenarios.** The CLI now times each
+  scenario and sets its duration.
+- A thread that was cancelled, disconnected or cut by a restart is usable on the next request
+  (the core fix), and a client disconnect during a stream no longer leaves the thread lock held.
+- `POST /v1/threads/{thread_id}/messages` and the other write routes no longer race an active
+  run (see Breaking).
+- Resuming a thread paused at `interrupt()` works on Postgres over HTTP and WebSocket.
+- `DELETE` of a message removes it from the thread state and cache, not only from the message
+  list, and removes media only when state no longer references it.
+- Mem0 memory search: client `filters` cannot replace the owner `user_id`. The keys `user_id`,
+  `agent_id`, `app_id` and `run_id` are dropped from client filters.
+- Memory list paging: a user with more than 1,000 memories can page through them.
+- `10xgraph eval --threshold` exits 1 only when the pass rate is below the threshold, not below
+  100 percent. The production template's own gate (0.75) passes.
+- `10xgraph init` escapes the agent name before it writes `pyproject.toml` and `.env.example`,
+  `--python-version` accepts only supported versions, template substitution errors are no
+  longer swallowed, `10xgraph skills --force` copies before it deletes, and `10xgraph eval`
+  loads `confeval.py` only from the project.
+- The `checkpointer` key in `10xgraph.json` was ignored without a word. The server now warns
+  at load when it is set, and the skill templates no longer tell you to set it.
+- The in-memory checkpointer fallback and per-process locks now log a startup warning in
+  production or with more than one worker.
+- The run-trace store closes a cancelled run, so the playground no longer shows a disconnected
+  run as still running, and its memory use is bounded.
+- The first REST invoke example in the docs now sends a content block and no client-invented
+  `thread_id`.
+
+### Security
+
+- `POST /v1/threads/{id}/messages` and `PUT /v1/threads/{id}/state` now check `file_id` media
+  blocks for ownership the same way invoke does; provider file ids are refused there as on invoke.
+- Ids in requests are bounded (see Breaking), which keeps oversized ids out of log lines, Redis
+  keys and database keys.
+- Redis keys for ownership, run and WebSocket slots, the thread lock and revocation are built
+  from percent-encoded parts, so an id with a colon cannot collide with another key.
+- Redis timeouts and a bounded pool stop a blackholed Redis from hanging every request that
+  reaches revocation, the thread lock or the limiter.
+- JWT startup checks: the algorithm allowlist, PyJWT required at boot, and an exact `auth`
+  parse (see Breaking). The `user_id` and scope rules from `1.0.0rc1` still apply.
+- Rotating the JWT secret no longer has to invalidate every token (`JWT_SECRET_KEYS`), and a
+  maximum token age can be enforced (`JWT_MAX_TOKEN_AGE_SECONDS`). Both are opt-in.
+- Upload bodies are parsed after authentication, and client dicts and lists are size-capped
+  (see Changed), so an unauthenticated or oversized request costs less memory.
+- Secrets and request text no longer reach logs or clients through validation error echoes,
+  the access log or unsanitized log lines.
+- Extracted document text is removed with the file, and uploads are bounded by image pixel,
+  PDF size and page limits.
+- The production template defaults to JWT, ownership authorization, Redis rate limiting and
+  `by: user` rate limiting when auth is on, and `10xgraph build` and `10xgraph config` warn
+  about a missing auth or authorization setup.
+
+## [1.0.0rc1] - 2026-10-28
+
+This is the 1.0 release candidate. It requires `10xgraph` 1.0 (`10xgraph>=1.0.0rc1`), and its
+`major.minor` is aligned with core `10xgraph` and `10xgraph-client`. Install it with
+`pip install -U --pre "10xgraph-api==1.0.0rc1"`.
+
+### Breaking
+
+- **`runs.thread_ids` defaults to `"server"`** (was `"client"`). REST and WebSocket clients that
+  invent a thread id for a new thread now get 403 on `/v1/graph/invoke`, `/v1/graph/stream`,
+  `/v1/graph/ws` and the checkpointer write routes (`PUT /v1/threads/{id}/state`, message
+  writes). Migrate by omitting the id on the first request and using the `meta.thread_id` the
+  server returns from then on (`"new"` over `/v1/graph/ws`), or set
+  `"runs": {"thread_ids": "client"}` in `10xgraph.json`. AG-UI and `/v1/graph/live` follow the same setting (see the next item). Only the built-in
+  ownership and rbac backends refuse; `allow_all` and custom backends do not unless they read
+  `server_thread_ids` themselves.
+- **Production deployments with the default or wildcard `ALLOWED_HOST` or `ORIGINS` refuse to
+  start.** Set explicit values, or `STRICT_PRODUCTION_CHECKS=false`. A public, token-less API
+  that runs in production with `ORIGINS=*` and `CORS_ALLOW_CREDENTIALS=false` also needs the
+  opt-out.
+- **Production runs longer than 300 s are cancelled** (invoke 504, stream and AG-UI error). Raise
+  `runs.timeout`, or set it to `null`.
+- **An unknown `MODE` now refuses to start.** Accepted values (case-insensitive):
+  `production`, `prod`, `development`, `dev`, `local`. Anything else, such as `staging` or
+  `test`, fails at startup (and in `10xgraph dev`) with an error listing them. Set `MODE` to
+  one of these values.
+- **Requests over the size limits get 422** (500 messages, 100 blocks per message, 1,000,000
+  characters of text; on AG-UI, for the trailing turn, with a 10,000-message cap on history).
+- **`POST /v1/threads/{thread_id}/messages` is now admin-only.** It needs the
+  `checkpointer:import` scope held explicitly: an identity with no scopes gets 403, and a `"*"`
+  role has it. It still takes any role, since it imports history, but tool calls, media
+  ownership and size limits are still enforced. Normal clients should send messages through
+  invoke or stream, and use the new `PUT .../messages/{message_id}` for feedback.
+- Assistant and system messages, and `context_summary` / `execution_meta`, are rejected with 422
+  on the client routes listed under Security.
+- **Custom authorization backends are isolated by default.** A backend that implements only
+  `authorize()` now gets per-owner storage isolation (`isolation_scope()` returns `"owner"`),
+  where it used to share all threads and memories. If you relied on sharing, add
+  `def isolation_scope(self) -> str: return "none"`.
+- **JWTs with an invalid `user_id` or scope claim are refused with 401.** `user_id` must be a
+  non-empty string or an integer; null, empty, boolean, float, list and dict are rejected, and an
+  integer becomes a string. A `scope` / `scopes` claim that is not a string or a list of strings
+  is rejected. Fix the issuer. A string `scopes` is now split on spaces instead of matched by
+  substring, so tokens that depended on that stop matching.
+
+### Security
+
+- **Handled client errors no longer log at ERROR, and Sentry no longer sends request bodies.**
+  The error handlers now log at the level of the status they return: a 4xx (401, 403, 404, 413,
+  422, 429 and so on) is one WARNING line with method, path, status and error code, no
+  traceback and no body; a 5xx stays ERROR with the traceback. Before, every 404 or bad token
+  wrote an ERROR with a full traceback, and Sentry's logging integration turned each into an
+  event despite the 5xx-only setting. Sentry now also starts with `max_request_body_size="never"`,
+  `include_local_variables=False` and `send_default_pii=False`, and only ERROR logs become
+  events (WARNING and INFO stay breadcrumbs). Responses are unchanged. Alerts that matched ERROR
+  for 4xx must match WARNING instead.
+- **AG-UI data is server config, and `ag_ui` is a reserved key.** The AG-UI endpoint now puts
+  `context`, `tools` and `forwarded_props` into the server-owned run config, which is merged after
+  the client checks. A `runs.config_keys` allow-list no longer rejects AG-UI runs, and nodes
+  still read `config["ag_ui"]` as before. Invoke, stream and `/v1/graph/ws` drop a client-sent
+  `config.ag_ui`, so a plain graph request cannot pose as AG-UI context or tools.
+- **The memory rate limiter evicts in constant time at its key cap.** Keys are kept in
+  least-recently-used order, so a new key at the 50,000-key cap drops the oldest entry from the
+  front instead of sweeping and scanning every key (about 2.5 ms of blocked event loop per new
+  key before). Idle-key cleanup runs in the background only, pops from the front and stops at
+  the first fresh key. The "bucket cap reached" warning is logged at most once a minute.
+- **REST state responses hide error text in production.** `GET /v1/threads/{id}/state`
+  returned `execution_meta.internal_data.error` with the raw exception text. With
+  `MODE=production` it is now the same generic message (keeping the error code) that stream,
+  WebSocket and AG-UI error chunks already send. Development is unchanged.
+- **Ownership cache keys can no longer collide with delete markers.** Redis owner entries
+  now live under `<prefix>:id:<thread_id>` and "just deleted" markers under
+  `<prefix>:tomb:<thread_id>`. Before, a thread named `deleted:X` shared a key with the marker
+  for `X`, so it could block other users from creating `X` for up to an hour. Old keys are no
+  longer read; the cache refills from the database.
+- **Client thread ids are escaped in request logs, and not logged in production.** The graph
+  observability, stop, fix and WebSocket run lines, and the AG-UI run line, now log the id with
+  `log_safe` and are only emitted outside `MODE=production`. The WebSocket authorization-failure
+  warnings and the thread-naming warning stay in production but escape the id, so a thread id
+  with a newline can no longer forge a log line.
+- **Store routes cap free text and forward only known options.** `query` is limited to 8,000
+  characters and `content` (store and update, string form) to 100,000; longer input returns
+  `422`. The client `options` field now passes only `infer` and `replace_metadata` to the store
+  (everything else, `memory_id` included, is dropped) instead of arbitrary keyword arguments.
+  With core `aforget_memory` now applying `memory_type`, `category` and `filters`, a narrow
+  forget no longer deletes all of the caller's memories; `Mem0Store` rejects narrowing.
+- **OTEL no longer prints spans to stdout in production.** With `OTEL_ENABLED=true` and no
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, `MODE=production` now sets up no exporter and logs a warning;
+  the console exporter is development-only.
+- **Generated deployment files are locked down by default.** `10xgraph build` images run as a
+  fixed uid 10001 (`USER 10001:10001`). `--k8s` sets a restricted `securityContext` (non-root,
+  read-only root filesystem, no privilege escalation, all capabilities dropped,
+  `RuntimeDefault` seccomp), turns off the service account token, reads secrets from a
+  `<service>-secrets` Secret via `envFrom`, and uses a pinned placeholder image instead of
+  `:latest`. `--docker-compose` publishes the port on `127.0.0.1` only, reads `.env` through
+  `env_file`, and runs read-only with `cap_drop: ALL` and `no-new-privileges`. `/tmp` and
+  `/app/uploads` are the only writable paths in both. `.dockerignore` also excludes private
+  keys, certificates and cloud credential files, and an existing `.dockerignore` gets the
+  missing patterns appended instead of being left as is. Regenerate with `--force` to pick
+  this up; the compose file now expects `ORIGINS` and `ALLOWED_HOST` in `.env`.
+
+- **`10xgraph init` writes a `.gitignore`** that keeps `.env`, keys and credential files out of
+  git (`.env.example` stays tracked), plus `uploads/` and `eval_reports/`. An existing
+  `.gitignore` is never replaced; only the missing secret patterns are appended.
+
+- **A client can no longer pick the vector store collection on a graph run.** `collection` is now
+  a server-owned config key: invoke, stream, `/v1/graph/ws` and AG-UI drop it from client config,
+  as the store routes already did, so the memory tools cannot be pointed at another
+  application's collection or made to create new ones. The value is ignored, not refused (the
+  drop is logged at debug), like every other server-owned key. The developer picks collections
+  in code: the store default, `UserMemoryConfig(collection=...)` /
+  `AgentMemoryConfig(collection=...)`, or `RAGAgent` store config.
+
+- **Nobody can authenticate as a reserved owner of shared data.** Core keeps shared, ownerless
+  data (agent/app memory, RAG knowledge bases) under `system_user_id(name)` (`"__system__:<name>"`,
+  one owner per agent). An identity with such a `user_id` would read and write that data through
+  the store routes, so the API now refuses any `user_id` starting with `__system__`
+  with 401 `This user id is reserved` (WebSocket close 1008) and a warning in the log, for the
+  built-in JWT backend and any custom `BaseAuth`. The check sits in `RequirePermission` and
+  `verify_current_user`, so it covers HTTP, `/v1/graph/ws`, `/v1/graph/live` (handshake and the
+  30 s re-check) and AG-UI. A reserved identity is never stored in or served from the per-request
+  identity cache, and the rate limiter does not key on it (it falls back to the address). Auth-off
+  development still uses `"anonymous"`. Whitespace around the name is ignored; ints are never equal
+  to it. If your identity provider issues this id, rename that user.
+- **Thread ids are server-made by default (`runs.thread_ids: "server"`).** The default was
+  `"client"`, where the first user to name an id owned it (squatting `"default"` locked out its
+  intended owner) and a run on an unknown id answered 200 while a taken one answered 403 (an
+  existence oracle). Now REST `invoke`/`stream`, `/v1/graph/ws` and the checkpointer write routes
+  accept only ids of threads that exist, with the same 403 for an unknown and a foreign id; a new
+  thread is started by omitting the id (or `"new"` over WebSocket) and the server picks the id.
+  AG-UI (`POST /v1/ag-ui`) and `/v1/graph/live` still accept an id the frontend made, because
+  CopilotKit and the realtime client create their own; the caller owns a new one, and an existing
+  thread is owner-checked as before. They pass `client_thread_ids=True` to
+  `AuthorizationBackend.authorize` (a custom backend sees it in `**context`). The boot refusal for
+  `ag_ui` with `thread_ids: "server"` is gone. `"client"` stays available as an explicit opt-in.
+- **`/v1/graph/live` now re-checks the token during the session.** It was verified only at the
+  handshake, so a token that expired or was revoked (`token_revocation`) kept streaming audio to
+  the provider. The credential is now re-checked before the session starts and every 30 seconds
+  after, with the same expiry and revocation checks `/v1/graph/ws` runs before each run
+  (a revocation backend outage counts as revoked). On failure the server sends a fatal
+  `session_expired` event and closes with 1008. Live sessions already count against
+  `websocket.max_connections_per_user`. Buffered input is also capped at 16 MiB per session
+  (frames over it are dropped and logged), where before only the frame count was bounded
+  (1000 frames of up to 1 MiB each). Clients must reconnect with a fresh token when a session
+  ends this way.
+- **`MODE` is now validated.** It is trimmed and lowercased, and `prod` means `production`;
+  `dev` and `local` mean `development`. Before, any value other than exactly `production`
+  (`prod`, a typo) silently ran with the development posture: docs on, evals router mounted,
+  weak JWT secret only warned, CORS wildcard accepted. Unset still means `development`.
+- **HTTP routes now take the bearer token only from the `Authorization` header.** The
+  `Sec-WebSocket-Protocol: 10xgraph-bearer, <token>` credential (and the legacy
+  `agentflow-bearer` form) was also accepted on plain HTTP requests; it is now honoured on
+  WebSocket connections only, like `?token=`. Browser WebSocket clients are unaffected.
+- **Clients can no longer set `file_tool_root`, `workspace_root`, `tool_timeout` or
+  `node_timeout` in request `config`.** Core reads these keys from the run config, so a client
+  could point the prebuilt file tools at any directory on the server, or turn off the tool and
+  node time limits with `0` or `null`. They are now dropped like `authz` and `user_id`. Set
+  them in your graph instead (for the file tools, use `create_file_tools(root=...)` from
+  `10xgraph`).
+- **New `runs.max_parallel_tool_calls` in 10xgraph.json** (positive integer, editable in
+  `10xgraph config`). The server sets it as the run's `max_parallel_tool_calls` on every run
+  path, capping how many tool calls one model turn runs at once. Clients cannot set it. Unset,
+  core's default (10, or `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`) applies. Needs `10xgraph` 1.0
+  or later.
+- **Built-in state fields are never client-writable.** `context_summary` and `execution_meta`
+  in `initial_state` (invoke, stream, WebSocket) or in `PUT /v1/threads/{id}/state` now get 422.
+  Before, `PUT state` wrote `context_summary`, which the model reads as its own earlier words.
+  Custom state fields and `runs.state_keys` work as before. AG-UI already dropped them.
+- **Client messages are user messages only.** On invoke, stream, WebSocket and the `context` of
+  `PUT state`, a message with role `assistant` or `system` gets 422, and so does a `tool`
+  message that holds anything but tool results. This closes forged assistant turns that
+  persisted in the thread.
+- **Forged tool results are refused on thread routes too.** `PUT state` applies the check
+  invoke already had: a tool result is accepted only as the answer to a remote tool call that is
+  waiting for one.
+- **The server generates every message id.** A `message_id` sent on invoke, stream, WebSocket
+  or in `PUT state` context is ignored, so a client cannot pre-claim ids. AG-UI keeps client ids
+  (its converter relies on them).
+- **External media URLs are checked before the run.** Every media block with a non-internal URL
+  (`http(s)://`, `gs://` and so on) in client input is run through the graph's media fetch
+  policy (`compiled_graph.media_policy`, or the default `MediaFetchPolicy`) on invoke, stream,
+  WebSocket, AG-UI, `POST /v1/threads/{id}/messages` and `PUT /v1/threads/{id}/state`. A blocked
+  URL gets 400 with the policy's message (on the WebSocket, an error chunk). No network is
+  touched. The policy lives in core and is set in code; the API has no setting for it. Needs a
+  core release that ships `MediaFetchPolicy`; on older cores the check is skipped.
+- **Uploads must look like their declared type.** `POST /v1/files/upload` compares the first
+  bytes with the declared type for PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, PDF, Office (ZIP and
+  OLE), MP3, WAV, OGG, FLAC, MP4 and WebM, and answers 415 `file content does not match <type>`
+  on a mismatch. Types with no known signature (plain text, JSON, CSV) are accepted as before.
+  EXIF is kept.
+- **Log lines escape control characters.** `log_safe` now also escapes ESC and the other C0
+  control characters (not just CR and LF), and the upload route logs the client filename
+  through it.
+- **Document text extraction is bounded.** HTML, XML, CSV, Markdown, JSON and plain-text
+  uploads over 5 MiB are no longer parsed (a 12 MB HTML file used about 1.2 GB of RAM); they
+  are stored without extracted text and a warning is logged. At most 2 extractions run at once,
+  and a slot stays taken until the worker thread actually finishes, so the 30 s timeout can no
+  longer let threads pile up.
+- **`10xgraph skills` no longer follows symlinks in the target project.** It refuses to install
+  when any existing component of the destination (`.claude`, `.agents`, `.github` and the
+  paths under them) is a symlink, or when the resolved destination is outside `--path`, so a
+  hostile repo cannot make it delete or write files elsewhere.
+
+- **One run at a time per thread.** Invoke, stream, `WS /v1/graph/ws` (each run on the socket)
+  and AG-UI take a per-thread lock before the graph starts, so a double submit or two tabs can
+  no longer run tools twice or interleave the history. The lock is a one-slot lease keyed by
+  thread id (`runs:thread:<id>`): shared through Redis when it is configured, otherwise per
+  process. It expires by itself (60 s, renewed while the run is alive), so a crashed worker
+  cannot hold a thread, and it is released when the run ends, fails, is cancelled or the client
+  disconnects. A second run on a busy thread waits up to 30 s, then gets **409** with the
+  message "thread is busy" in the standard error envelope (streaming routes answer before the
+  response starts; on the WebSocket it is an error chunk `{"event": "error", "data": {"reason": "thread is busy"}}` and
+  the socket stays open). A new thread is locked as soon as its id exists. `/v1/graph/live` is
+  not covered. Apps that sent parallel runs on one thread will now see them queue or get 409.
+  A Redis error lets the run proceed (logged), like the per-user run cap.
+- **Production hides raw error text on stream, WebSocket and AG-UI.** A failing node or tool put
+  its exception text (for example a `redis://:SECRET@host` connection string) in the `ERROR`
+  chunk's `data.reason`, `data.error` or `data.message`, and in `state.execution_meta` at full
+  granularity, and the stream forwarded it, while invoke already answered generically. With
+  `MODE=production` the three paths now share one step (`sanitize_error_chunk`, applied in
+  `GraphService.stream_chunks`) that swaps that text for the same generic message invoke uses
+  (`An error occurred in a graph node.`, chosen by the `[NODE_001]` style code when present). The
+  core's own `Tool '<name>' failed with an internal error (reference <id>).` text is kept: it
+  holds no detail. Development is unchanged.
+
+- **A resume can name the interrupt it answers.** `POST /v1/graph/invoke`, `POST /v1/graph/stream`
+  and the `/v1/graph/ws` frame accept an optional `interrupt_id`. If the thread is not paused, or
+  is paused at a different interrupt, the request gets 409 before anything runs (an error chunk on
+  stream and WebSocket). A retried or stale resume can no longer answer the next prompt unseen.
+  The id is also passed to core as `resume_interrupt_id`.
+- **Resume answers are checked against the interrupt's `response_schema`.** A failing answer is
+  422 on invoke and an error chunk on stream, WebSocket and AG-UI; a core interrupt mismatch is
+  409. Needs a core release with `ResumeValidationError` and `InterruptMismatchError`.
+- **Request size limits.** At most 500 messages per request, 100 content blocks per message and
+  1,000,000 characters of text in total across text blocks; over a limit is 422 naming the limit.
+  Applies to invoke, stream, WebSocket (`messages` and `tool_result`), `PUT
+  /v1/threads/{id}/state` `context` and `POST /v1/threads/{id}/messages`. AG-UI clients resend
+  the whole conversation, so on AG-UI the limits apply to the trailing turn (what reaches the
+  graph) and the full history only gets a 10,000-message cap plus the per-message block cap. The
+  limits are fixed, not settings.
+- **A custom `AuthorizationBackend` now isolates users by default.** `isolation_scope()` used to
+  default to `"none"`, so a backend that implemented only `authorize()` silently turned off
+  per-user storage isolation: every user saw every thread and memory. It now defaults to
+  `"owner"`. Return `"none"` from `isolation_scope()` to share data on purpose. The built-in
+  backends behave as before (`allow_all` / `default` / `none` share, `ownership` and RBAC isolate;
+  `DefaultAuthorizationBackend` now says `"none"` explicitly).
+- **JWT `user_id` and scope claims are validated.** `user_id` must be a non-empty string or a
+  whole number (not a boolean), which is stored as a string (`7` becomes `"7"`); null, empty or
+  whitespace-only, boolean, float, list and dict get 401. Revocation is checked on `jti` even
+  when `user_id` is missing or odd (it was skipped for a falsy `user_id`); per-user revocation
+  applies to a valid `user_id`. The OAuth `scope` claim (space-separated) was ignored, leaving
+  the token unrestricted, and a string `scopes` was matched by substring (`xgraph:invoke_admin`
+  granted `graph:invoke`). Both `scope` and `scopes` (a list, or a space-separated string) are now
+  read and merged into a set of exact scope names. A scope claim of the wrong type (number,
+  dict, list holding non-strings) gets 401. A token with no scope claim stays unrestricted.
+
+- **`runs.timeout` defaults to 300 seconds in production** (no limit in development). Set a
+  number in `10xgraph.json` to change it, or `null` to remove the limit. The timeout error tells
+  the client to raise `runs.timeout` in `10xgraph.json`. Realtime sessions stay unlimited.
+- **`STRICT_PRODUCTION_CHECKS` is on by default in production.** A wildcard `ALLOWED_HOST` or
+  `ORIGINS`, or enabled `DOCS_PATH`/`REDOCS_PATH`, stops the server from starting. Set
+  `STRICT_PRODUCTION_CHECKS=false` to opt out.
+- **The wildcard check in `ORIGINS` and `ALLOWED_HOST` strips entries**, so `" *"` and
+  `"api.example.com, *"` are no longer missed.
+- **Generated production files use placeholders instead of `*`.** The production `.env.example`
+  and the generated docker-compose and Kubernetes files set placeholder origins and hosts.
+
+### Added
+
+- **`observability.user_id_mode`** in `10xgraph.json` (`"raw"` default, `"hash"`, `"mask"`):
+  how the user id appears in traces. It is passed to the `OtelPublisher` the server binds, for
+  both the `observability` block and `OTEL_ENABLED`, and shown in the `10xgraph config`
+  editor's Observability section. `hash` is keyed when `TENXGRAPH_TRACE_USER_ID_KEY` is set.
+  Message and tool content stay in traces at the `full` level. A core without the option
+  keeps the raw id and logs a warning.
+- **`on_busy` request option** (`"wait"` default, or `"cancel"`), a top-level field next to
+  `recursion_limit` on `POST /v1/graph/invoke`, `POST /v1/graph/stream` and `WS /v1/graph/ws`.
+  With `"cancel"`, a run that finds its thread busy asks the running run to stop (the same
+  mechanism as `POST /v1/graph/stop`, repeated while waiting), then waits for the lock and runs;
+  an idle thread just runs. The 30 s wait limit and 409 still apply. AG-UI has no such field and
+  always waits.
+- **Uploaded files live and die with the messages that use them.** When an accepted message
+  carries `graph://media/<key>` (or the legacy `agentflow://media/`), the thread id is added to
+  the file's `threads` metadata (owned files only; invoke, stream, WebSocket, AG-UI,
+  `POST /v1/threads/{id}/messages`, `PUT .../state`). Deleting a message (only when no other
+  message in the thread still uses the file) or a thread drops the link, and a file with no
+  link left is deleted. A file shared by two threads stays until both are gone. Files uploaded
+  before this release have no `threads` key and are never deleted automatically. Cleanup
+  failures are logged and never fail the delete. Needs a core release with
+  `BaseMediaStore.update_metadata`; on older cores nothing is tracked or auto-deleted.
+- `media.delete_with_thread` in 10xgraph.json (default `true`, editable in `10xgraph config`).
+  `false` keeps recording links but never deletes a file automatically.
+- `DELETE /v1/files/{file_id}` deletes a file and its metadata. Owner only: 404 (not 403) for a
+  missing file or one that belongs to someone else. Returns `{"data": {"file_id": "...",
+  "deleted": true}, "metadata": {...}}`. Needs the new `files:delete` scope, which `"*"` roles
+  have.
+
+- `PUT /v1/threads/{thread_id}/messages/{message_id}` sets feedback on a message. Body:
+  `{"feedback": {...}}` (any JSON object, at most 8 KB serialized and 10 levels deep, else 422).
+  It is stored in the message metadata under `feedback` and nothing else on the message can
+  change. Needs `checkpointer:write` and thread ownership; 404 when the thread has no such
+  message; 501 until `10xgraph` 1.0 (`aupdate_message_metadata`) is installed.
+- `RequirePermission(..., explicit_scope=True)`: the scope must be granted explicitly, even for
+  an identity that declares no scopes.
+- Scope `checkpointer:import`, granted to `"*"` roles.
+
+- `interrupt_id` on graph invoke, stream and WebSocket input. WebSocket input now also accepts
+  `resume`, which was dropped before, so a `fresh` frame can resume an `interrupt()` without
+  messages.
+
+### Changed
+
+- An unknown `current_node` in `initial_state` returns 422 (was a 500 from core). Wrong-typed
+  state values (a string for an `int` field) return 422 naming the field, on run input and on
+  `PUT state` (was stored, then crashed a later run).
+- Uploaded documents over the extraction size limit no longer cause a slow or memory-heavy
+  parse; the upload succeeds with `extracted_text` null.
+
+### Fixed
+
+- **Client mistakes on thread routes are a 404 or 422, not a 500, and state and message
+  responses no longer carry provider or framework internals.** `GET` and `DELETE` of a message
+  the thread does not have return 404 on every checkpointer (in-memory and SQLite raised
+  `IndexError`, Postgres deleted silently). `PUT /v1/threads/{thread_id}/state` with a `context`
+  that is not a list of messages returns 422 naming the field. Message `raw` is no longer
+  returned by the thread state and message routes, and `execution_meta.internal_data` in state
+  responses keeps only `error` (the playground shows it). `usages` and the interrupt fields are
+  unchanged.
+- **Development error responses for node and graph errors are no longer a 422.** Outside
+  production, `GraphError`, `NodeError`, recursion, storage, transient storage, metrics, schema
+  version and serialization errors put their `context` dict into `details`, which expects a
+  list, so the client got `422 VALIDATION_ERROR` instead of the real status and code. Each
+  context key now becomes one `details` entry (`loc` the key, `msg` the value, `type`
+  `context`). Production still hides `details`.
+- **`POST /v1/graph/fix` no longer deletes healthy tool-call messages.** It treated every
+  assistant message with tool calls as broken (provider-shaped tool calls never carry
+  `content`), which orphaned the tool results. It now removes only assistant messages with a
+  tool call that has no result (matched by call id), then the tool results left without a call.
+  The unanswered calls of the latest assistant message are kept while the thread is paused
+  (`interrupt()`, HITL `interrupt_before` / `interrupt_after`) or waiting on a client tool.
+  A thread with nothing to repair returns `removed_count` 0 and is not written.
+
+## [0.9.0] - 2026-10-22
+
+One server command, a guided `10xgraph init`, leaner production images and Python 3.14 and
+3.15 support. This release has a breaking change: read the **Breaking** list before upgrading.
+
+### Breaking
+
+- **`10xgraph api` and `10xgraph play` are removed; `10xgraph dev` is the only server command.**
+  All three ran the same local Uvicorn dev server. Migration: `10xgraph api` ->
+  `10xgraph dev --no-open`, `10xgraph play` -> `10xgraph dev`. Options are unchanged
+  (`--config`, `--host`, `--port`, `--reload/--no-reload`). `10xgraph demo --style` no longer
+  accepts the `play` / `api` aliases. Production is unaffected: the image from `10xgraph build`
+  runs Gunicorn directly.
+
+### Added
+
+- **Python 3.14 and 3.15 are officially supported.** The test suite runs on 3.12, 3.13, 3.14
+  and 3.15 in CI, and the package classifiers list all four.
+- **`websocket.enabled` in `10xgraph.json`** turns the WebSocket routes on or off. `false` leaves
+  out `/v1/graph/ws` and `/v1/graph/live`, so the server needs no WebSocket library. `true`
+  without one refuses to boot with the install hint. Unset keeps them mounted, as before, but
+  now logs a warning when no library is installed (previously a non-Google project silently
+  answered 404 on both routes, because only `google-genai` brought in `websockets`).
+- **`10xgraph-api[websocket]` extra** (`websockets`) for those routes.
+- **`10xgraph init` asks whether to enable WebSocket streaming and realtime audio**
+  (`--websocket/--no-websocket`, default off). Yes adds the `websocket` extra to a production
+  `pyproject.toml` and writes `"websocket": {"enabled": true}`; no writes `false`.
+- **`10xgraph init` asks for the AI provider** (Google Gemini, OpenAI or Anthropic Claude;
+  `--provider` for non-interactive runs, default `google`). The scaffold's model, provider,
+  `.env.example` API key, test conftest and eval simulator model follow the answer.
+- **`10xgraph-api[images]` extra.** Pillow is optional in core `10xgraph`; this extra installs it
+  for image resize, EXIF orientation and format conversion.
+
+### Changed
+
+- Replaced `asyncio.iscoroutinefunction`, which is removed in Python 3.16, with
+  `inspect.iscoroutinefunction`. No behaviour change.
+- **Production scaffolds list only the dependencies the answers need.** `pyproject.toml` now
+  depends on `10xgraph[<provider>]` and `10xgraph-api[jwt,redis]` as chosen (no extras when
+  neither is picked), and drops the hardcoded `google-genai`. The generated Dockerfile installs
+  this list, so JWT and Redis work in the image without a separate `requirements.txt`.
+- **The generated Dockerfile removes pip and the CLI's own libraries from the image.** typer,
+  rich, questionary and what only they pull in (pygments, markdown-it-py, mdurl, prompt-toolkit,
+  wcwidth, shellingham) are uninstalled in the builder stage by `tenxgraph_api/_slim_image.py`,
+  unless another installed package still needs them. With pip, about 38 MB smaller.
+- Dropped unused dev dependencies (`mkdocs-gen-files`, `mkdocstrings`, `mypy-extensions`,
+  `lib`, `markdown-it-py`).
+
+### Fixed
+
+- **`10xgraph init` generated a `pyproject.toml` claiming Python 3.10.** The template said
+  `requires-python = ">=3.10"`, but `10xgraph` needs 3.12, so installing a generated project
+  on 3.10 or 3.11 failed. It now says `>=3.12`.
+- **Redis rate limiting from a URL crashed at startup** with `NameError: Redis`: the class was
+  imported only for type checking but used at runtime to bind the client.
+- **A production scaffold with the Redis rate limiter did not start:** `10xgraph.json` had no
+  Redis URL. It now reads `"redis": {"url": "${REDIS_URL}"}` from `.env`.
+- **A production scaffold did not start at all:** `10xgraph.json` points at
+  `graph.agent:container`, which the template never defined. `graph/agent.py` now exports it.
+- **The production scaffold's `tests/test_graph_nodes.py` failed on collection** (it imported
+  `graph.nodes` and `graph.utils`, which the template does not create). It now tests the agent
+  in `graph/agent.py`.
+
+## [0.8.0] - 2026-10-16
+
+Security and scalability pass over the API, following an external review. Every item below
+has tests; see the review notes for the full list. This release has breaking changes: read
+the **Breaking** list before upgrading.
+
+### Breaking
+
+- **Ownership checks fail closed.** With auth on, an ownership or `rbac` authorization
+  backend now refuses to start on a checkpointer that cannot resolve thread owners
+  (`aget_thread_owner` not implemented), and denies thread requests if none is available at
+  runtime. Implement `aget_thread_owner`, or set `"authorization": "allow_all"` or a custom
+  backend.
+- **An unowned thread only allows actions that create it** (`graph:invoke`, `graph:stream`,
+  `checkpointer:write`). Reading, deleting, stopping or fixing a thread that does not exist
+  (or has no owner) now answers 403 instead of an empty result.
+- **Authorization defaults to `ownership` whenever auth is configured**, in every mode. It
+  used to be `allow_all` unless `MODE=production`. Set `"authorization": "allow_all"` to keep
+  the old development behaviour.
+- **Realtime init frames can no longer replace the system prompt by default.** Add
+  `"system_prompt"` to `websocket.realtime_client_overrides` to allow it.
+- **`trusted_proxy_headers: true` without `trusted_proxies` trusts only loopback and private
+  networks**, not every peer. List your proxy networks (or `0.0.0.0/0` and `::/0`).
+- **Production defaults:** `MEDIA_REQUIRE_OWNER` is on, `graph_introspection` is `scoped`
+  (graph structure, tools and state schema need the `graph:read` scope), and `IS_DEBUG` is
+  forced off.
+- **`/v1/graph/invoke` no longer returns `meta.thread_name`**; the name is generated in the
+  background and appears on the thread (`GET /v1/threads`).
+- **Production 4xx responses keep their message**; only 5xx are made generic. A 422 built
+  from an unexpected `ValueError` is still made generic.
+- **`gunicorn` is no longer a dependency.** The generated Dockerfile installs it, so
+  `10xgraph build` images are unaffected. If you run `gunicorn` yourself outside that image,
+  install it alongside the API: `pip install gunicorn uvicorn-worker`.
+- **Gunicorn's worker class is now `uvicorn_worker.UvicornWorker`** (from the `uvicorn-worker`
+  package). `uvicorn.workers.UvicornWorker` is deprecated in uvicorn. Regenerate the
+  Dockerfile and compose file with `10xgraph build --force`, or change `-k` in your own
+  command.
+- **`POST /v1/graph/fix` returns `state` as a JSON object.** It used to be a JSON-encoded
+  string. Drop any `JSON.parse` / `json.loads` on that field; the TS client already types it
+  as an object.
+- **Generated Dockerfiles install only the dependencies you list.** The `pyproject.toml` path
+  no longer adds `10xgraph-api` on top of your list. `10xgraph build` warns when the requirements file or `pyproject.toml` does not list
+  `10xgraph-api`.
+
+### Added
+
+- `runs` key in `10xgraph.json`: `thread_ids` (`client` | `server`), `config_keys` and
+  `state_keys` allow-lists, `max_concurrent_per_user` (default 10) and `timeout`.
+- `token_revocation` key (`redis`, `memory` or `module:attr`) and the
+  `TokenRevocationBackend` hook: revoked tokens are refused before they expire, on HTTP and
+  on every WebSocket run.
+- `graph_introspection` key (`open` | `scoped`).
+- `websocket.realtime_client_overrides` allow-list.
+- `STRICT_PRODUCTION_CHECKS=true`: production refuses to start on wildcard `ALLOWED_HOST` or
+  `ORIGINS`, or enabled API docs.
+- `GET /health/ready` readiness probe (checkpointer, Redis, store); the k8s manifest uses it.
+- Run and WebSocket connection caps are shared across workers through Redis when it is
+  configured.
+
+### Changed
+
+- `10xgraph play` and `10xgraph dev` open the hosted playground at its new address,
+  `https://play.10xgraph.com`. The previous address, `playground-463bd.web.app`, still
+  serves the same app for older releases.
+- Thread delete leaves a short tombstone so a deleted id cannot be handed to another user
+  while other workers still cache the old owner.
+- Every thread the API saves records its owner, which fixes owner lookups on the in-memory
+  and SQLite checkpointers.
+- WebSocket JSON frames over `MAX_REQUEST_SIZE` are refused (close 1009); `10xgraph api`
+  passes the same limit to uvicorn as `ws_max_size`.
+- Request ID, security headers and rate limiting are pure ASGI middleware; CORS is now the
+  outermost layer, so 429, 413 and Host rejections are readable by browsers.
+- Route-set security headers (such as the download sandbox CSP) are no longer overwritten.
+- The JWT is verified once per request when rate limiting by user.
+- Local-store downloads stream from disk; uploads are read into memory once.
+- JSON responses are serialized by pydantic-core (`model_dump_json`) instead of orjson.
+  FastAPI deprecated `ORJSONResponse` in 0.131; the FastAPI floor stays at 0.116.
+- Dependencies: dropped `orjson` and the unused `platformdirs`; the `uvicorn` floor is now
+  0.36 (required by `uvicorn-worker`).
+- Generated Dockerfiles build in two stages: dependencies go into a virtualenv in a builder
+  stage, and only that virtualenv and your code reach the runtime image. The runtime image
+  has no compiler or curl, copies code with `COPY --chown` instead of a second `chown -R`
+  layer, and its healthcheck uses the Python standard library.
+- A requirements file in a subfolder (for example `requirements/base.txt`) keeps its path in
+  the generated Dockerfile.
+- Packaging: `license` is an SPDX expression (`MIT`), so builds no longer warn about the
+  deprecated table form; the build needs setuptools 77 or later.
+
+### Security
+
+- **Log injection.** Values a client controls (user and thread ids, file ids, rate-limit
+  keys, request paths, run config and messages) are written to logs through `log_safe()`,
+  which escapes CR and LF, so a request cannot forge extra log lines. This covers the graph,
+  checkpointer and media services, the rate-limit middleware, the WebSocket guard and the
+  run limits.
+- **ReDoS in the log sanitizer.** The JWT detection pattern backtracked polynomially on
+  crafted input (about 585 ms for a 16,000-character string). It now matches in linear time.
+- **Security examples.** `examples/security/` no longer prints any part of an API key or of
+  the JWT secret. The API key example hashes keys with HMAC-SHA-256 and a server-side
+  `API_KEY_PEPPER`; hashes made with the previous example's plain SHA-256 must be
+  regenerated.
+
+## [0.7.0] - 2026-10-10
+
+**First release as `10xgraph-api`.** 10xScale Agentflow is now 10xGraph. This package
+replaces `10xscale-agentflow-cli`; the server, the CLI and the HTTP API are unchanged apart
+from the names below. The old package import, command, config file name and env vars keep
+working until 2.0.
+
+### Changed
+
+- **PyPI package `10xscale-agentflow-cli` is now `10xgraph-api`.** Uninstall the old package
+  and the old core first: `pip uninstall 10xscale-agentflow-cli 10xscale-agentflow`, then
+  `pip install 10xgraph-api`.
+- **Import package `agentflow_cli` is now `tenxgraph_api`** (`from tenxgraph_api import
+  BaseAuth`). `agentflow_cli` stays as a deprecated alias that resolves to the same module
+  objects and emits a `DeprecationWarning` once.
+- **The command is `10xgraph`.** `agentflow` is kept as a deprecated alias that prints a
+  one-line notice to stderr and runs the same CLI.
+- **The config file is `10xgraph.json`.** `agentflow.json` is still read when no
+  `10xgraph.json` sits in the same directory; when both exist, `10xgraph.json` wins. This
+  applies to the CLI (`api`, `play`, `dev`, `audit`, `config`, `eval`, `test`) and to the
+  server started without `GRAPH_PATH` (for example from the generated Dockerfile).
+  `10xgraph api` notes when it loaded the legacy name. `10xgraph init` writes
+  `10xgraph.json`. `10xgraph config` always edits `10xgraph.json`: when only
+  `agentflow.json` exists it opens prefilled from that file, and the first save creates
+  `10xgraph.json` without touching `agentflow.json`.
+- **Core dependency is `10xgraph>=0.10.0,<2.0`** (import `tenxgraph`), replacing
+  `10xscale-agentflow`. Do not install both: each ships an `agentflow` module.
+- **CLI env vars use the `TENXGRAPH_` prefix:** `TENXGRAPH_NO_FULLSCREEN`,
+  `TENXGRAPH_NO_SPINNER`, `TENXGRAPH_ASCII`. The `AGENTFLOW_` names are read when the new
+  variable is unset.
+- **Uploaded media is referenced as `graph://media/<key>`**, matching the core. Client
+  input using `agentflow://media/<key>` still resolves, and both forms go through the same
+  ownership check.
+- **Default `MEDIA_CLOUD_PREFIX` is `10xgraph-media`.** With the default, the core still
+  reads objects stored under `agentflow-media`; an explicitly set prefix is used as is.
+- **The WebSocket bearer subprotocol is `10xgraph-bearer`.** `agentflow-bearer`, which
+  released clients send, is still accepted and echoed back.
+- **The bundled skill installs as `10xgraph`** (`.claude/skills/10xgraph`,
+  `.agents/skills/10xgraph`, `.github/skills/10xgraph`) and the Copilot instructions file as
+  `10xgraph.instructions.md`. Earlier `agentflow` skill folders are left in place; delete
+  them after installing the new one.
+- **Logger names moved to `tenxgraph_api.*`** (from `agentflow-cli.*`, `agentflow_api.*` and
+  `agentflowcli`). Update any logging config that targets the old names.
+- The default Redis rate-limit key prefix is `10xgraph:rate-limit` (was
+  `agentflow:rate-limit`). Counters restart once on upgrade; a configured `prefix` is kept.
+- The config editor's session header is `X-10xGraph-Token`.
+- **`10xgraph build` Dockerfiles ship only what the server runs.** After installing
+  dependencies, the image deletes the CLI-only `tenxgraph_api/cli/templates` (project
+  scaffolds, bundled skill) and `tenxgraph_api/cli/config_editor` (the local HTML/JS editor).
+  The generated `.dockerignore` also leaves out `tests/`, `evals/`, `.claude/`, `.agents/`
+  and `.github/`. Regenerate the Dockerfile with `10xgraph build --force` to pick this up.
+- Repository, issues and changelog links point at
+  [github.com/10xGraph/10xgraph-api](https://github.com/10xGraph/10xgraph-api); docs at
+  [10xgraph.com](https://10xgraph.com).
+
+- **Terminal look follows the brand.** Colors come from the logo and docs palette: ink
+  text, the amber entry node, the blue accent (replacing the cyan/violet/pink gradient),
+  tuned to read on light and dark terminals. The intro is shorter (0.9s), shows the running
+  `10xgraph-api`, core and Python versions, draws the command pipeline like the logo's
+  graph, and can be skipped with any key.
+- **Easier exit.** Ctrl+C now quits immediately everywhere; it no longer stops on
+  "Press Enter to close". The pinned full-screen frame is now opt-in (`--fullscreen` or
+  `TENXGRAPH_FULLSCREEN=1`); by default the intro hands over to your normal scrollback, so
+  nothing waits for a key when a command ends.
+
+### Unchanged on purpose
+
+- Error code `AGENTFLOW_VALIDATION_ERROR` and the `agentflow.cli/v1` schema id in
+  `--format json` output, so clients and scripts that match on them keep working.
+- CLI error codes (`AF-*`).
+
+---
+
+## [0.6.0] - 2026-10-07
+
+**Final release of `10xscale-agentflow-cli`.** Agentflow is now 10xGraph
+([10xgraph.com](https://10xgraph.com), [github.com/10xGraph](https://github.com/10xGraph)).
+No further versions will be published under this name; the API server and CLI continue
+as `10xgraph-api`. Installed copies keep working, and `10xscale-agentflow-cli==0.6.0`
+can be pinned.
+
+### Added
+
+- **AG-UI endpoint (`POST /v1/ag-ui`)** serves the graph over the
+  [AG-UI protocol](https://docs.ag-ui.com), so AG-UI clients such as CopilotKit
+  (through its generic `HttpAgent`) can use an Agentflow agent. Off by default: set
+  `"ag_ui": {"enabled": true}` in `agentflow.json` and install the new `ag-ui` extra
+  (`pip install "10xscale-agentflow-cli[ag-ui]"`, `ag-ui-protocol>=1.0,<2`). The server
+  refuses to start with a clear install hint when the endpoint is enabled but the package
+  is missing. The route uses the `graph:stream` permission and checks `threadId`
+  ownership when auth is configured. Streams text and reasoning, tool calls and results,
+  node steps, application state (`STATE_SNAPSHOT`), and `interrupt()` pauses (`RUN_FINISHED`
+  with an `interrupt` outcome, answered through `RunAgentInput.resume`; `cancelled` resumes
+  with `None`). The thread's checkpoint is the record of the conversation, so only new user
+  messages and tool results from the client reach the graph. Browser tools the client sends
+  (`RunAgentInput.tools`, e.g. CopilotKit `useFrontendTool`) are offered to the model for that
+  run with no `agentflow.json` entry. `RunAgentInput.context`, `tools` and `forwardedProps`
+  are available to nodes as `config["ag_ui"]`. `agentflow init` writes
+  `"ag_ui": {"enabled": false}`, and `agentflow config` shows the new section. Requires
+  `10xscale-agentflow>=0.10.0` (`interrupt()` and per-run `remote_tools`).
+- **`resume` on `/v1/graph/invoke` and `/v1/graph/stream`.** Resumes a thread paused by
+  `interrupt()`; `messages` may be empty when `resume` is sent.
+- **`remote_tools` is a server-owned run-config key.** Client config can no longer set it on
+  any route; only adapters whose clients bring tools by protocol (AG-UI) fill it.
+- `GraphService.stream_chunks()` yields the graph stream as `StreamChunk` objects, with an
+  optional `server_config` for server-owned run config; `stream_graph()` (NDJSON) is now a
+  thin wrapper over it.
+- **`agentflow skills --validate PATH`** checks a skill directory, or a folder of
+  skill directories, against the Agent Skills specification (agentskills.io).
+  It reports errors and warnings per skill and exits `1` when any skill is
+  invalid. The option is repeatable, and it requires `10xscale-agentflow>=0.10.0`
+  (`agentflow.core.skills.validate_skill`).
+- **The bundled Agentflow skill conforms to the Agent Skills specification.** Its
+  `description` was invalid YAML (an unquoted `TRIGGER when:`), so strict parsers,
+  including Agentflow's own loader, rejected it. Codex, Claude and GitHub now all
+  receive one identical `SKILL.md` that references `references/...` relative to
+  the skill directory, instead of three copies hard-wired to one install path
+  each.
+- **`agentflow config` opens a browser editor for `agentflow.json`.** Optional sections
+  (auth, authorization, rate limiting, observability, ...) can be switched on or off and
+  filled in, validated without saving, and saved. Saving is blocked while there are errors,
+  writes are atomic, key order is preserved, and the previous file is kept as
+  `agentflow.json.bak`. Options: `-c/--config`, `--port`, `--no-open`.
+- **`remote_tools` in `agentflow.json`.** Trusted schemas for tools executed by clients,
+  attached to the graph at startup.
+- **`websocket.max_connections_per_user`** caps how many concurrent WebSocket connections one
+  verified user may hold.
+- **`rate_limit.trusted_proxies`.** When set, `X-Forwarded-For` is honoured only for requests
+  whose peer address is in one of the listed IPs or CIDR ranges.
+
+### Changed
+
+- **Requires `10xscale-agentflow>=0.10.0`**, the final release of the core under the old
+  name. It is the first core release with `interrupt()`, per-run `remote_tools` and
+  `validate_skill`. Do not install `10xgraph` in the same environment: both provide the
+  `agentflow` module.
+- WebSocket connection limits now default to finite values (`max_connections` 1000,
+  `max_connections_per_user` 10) instead of unlimited when the key is missing. Set a key to
+  `0` or `null` for unlimited. Graph runs started over `/v1/graph/ws` count against the
+  global `rate_limit` bucket.
+- Project URLs point at [10xgraph.com](https://10xgraph.com) and the 10xGraph organisation.
+
+### Security
+
+- **Server-owned config keys are stripped from client requests.** `authz`, `user`,
+  `user_id`, `remote_tools` and `_`-prefixed internal keys in a request's `config` are
+  dropped on every route that forwards it to the graph, checkpointer or store. The thread a
+  request runs on is the one the permission check approved, normalised on both sides.
+- **Client messages can no longer carry tool calls.** Only the model may request a tool; a
+  client may send a tool result only as the answer to a remote tool call still waiting for
+  one.
+- **Document extraction is bounded.** ZIP-based documents are inspected before parsing
+  (entry count, total uncompressed size, compression ratio), extraction has a timeout, and
+  extracted text is capped.
+
+### Breaking
+
+- **`POST /v1/graph/setup` is removed.** Declare client-executed tools under `remote_tools`
+  in `agentflow.json` instead; they are attached at startup.
+- **`agentflow config list|get|set|unset|path|validate` are removed**, and stored
+  `output.*` preferences are no longer read at startup. Pass `--format`, `--color` and
+  `--progress` on the command line instead. `agentflow config` is now the
+  `agentflow.json` editor above.
+
+---
+
+## [0.5.1] - 2026-09-24
+
+### Added
+
+- **Persistent full-screen application surface.** On an interactive terminal a
+  command now runs on its own screen with branded chrome pinned in place: a
+  header (gradient rule, identity, version, subtitle) at the top, a footer
+  status bar at the bottom, and the command's output scrolling between them.
+  Pinning uses a DEC scrolling region, so it survives output from child
+  processes — pytest, Uvicorn, Questionary prompts — without routing any of it
+  through a renderer. The screen is held until you press Enter, and released
+  through a `finally` guard so a crash can never leave your shell on an
+  alternate buffer or inside a scrolling region. Opt out with `--no-fullscreen`
+  or `AGENTFLOW_NO_FULLSCREEN=1`.
+- Full-canvas animated command intro: an eased block-letter `AGENTFLOW` reveal
+  with a moving light front, a flowing gradient field, a typed tagline, and a
+  per-command pipeline that fills in as the intro plays. Inside the full-screen
+  surface it collapses into the pinned header; with `--no-fullscreen` it plays
+  on a temporary screen and leaves a durable header in your scrollback.
+- Live step timelines (`OutputFormatter.timeline`): a command declares its stages
+  up front, so pending work is visible from the first frame while the running
+  stage animates with a spinner, elapsed timer, and a live detail line. Wired
+  into `play`/`dev`/`api`, `init`, `build`, `test`, and `audit`.
+- Determinate progress with a running pass/fail tally
+  (`OutputFormatter.progress_run`), used by `agentflow eval` so per-case results
+  scroll above a bar that reports completion, counts, and elapsed time.
+- Shared brand palette and glyph sets (`cli/core/theme.py`) with continuous
+  gradient sampling and a complete ASCII fallback set.
+- Command-specific intro signatures and taglines for `play`, `dev`, `api`,
+  `init`, `build`, `test`, `eval`, `audit`, and `skills`, previewable with the
+  side-effect-free `agentflow demo` (`--style all|typing|network|init|build|eval`).
+- Row-by-row reveal for completion panels.
+- **Shared guided-prompt layer** (`cli/core/prompts.py`). Every interactive
+  question now runs through one themed service, so prompts share a palette, a
+  cancellation contract (Ctrl+C returns to a clean exit rather than a
+  traceback), and one non-interactive policy.
+- `agentflow skills` picks agents with an arrow-key list where **space toggles**
+  and enter confirms, instead of typing a menu number. Each row shows its
+  install path, already-installed agents are labelled and pre-checked, and
+  choosing one that exists offers to overwrite rather than failing.
+- `agentflow skills` reports installs through a timeline and a completion
+  screen, matching every other command.
+- `agentflow init` prompts now explain each option inline — what Quick Start
+  versus Production scaffolds, what each auth mode requires, what each rate
+  limit backend costs.
+- Staged startup feedback, a pre-flight port check, and connected-playground
+  completion output for `agentflow play` and `agentflow dev`.
+- Adaptive `--animation` / `--no-animation` controls with CI, pipe, JSON, and
+  accessibility-safe fallbacks. Every animated surface has a plain
+  line-per-transition renderer and a versioned JSON/JSONL event renderer.
+- Adaptive Rich terminal rendering with TTY/CI detection, plain/JSONL modes,
+  `NO_COLOR` support, ASCII fallback, quiet mode, and shared status rendering.
+- Root `--format`, `--json`, `--color`, `--no-color`, `--progress`,
+  `--animation/--no-animation`, `--fullscreen/--no-fullscreen`, `--cwd`,
+  `--yes`, `--non-interactive`, `--debug`, and `-V/--version` options.
+- `agentflow dev` as the goal-oriented local development command (config, host,
+  port, `--reload/--no-reload`, `--open/--no-open`); `api` and `play` remain
+  available for compatibility.
+- `agentflow audit`: six read-only checks — Python interpreter, installed
+  `10xscale-agentflow-cli`, installed `10xscale-agentflow`, whether the installed
+  core still exposes the evaluation API `agentflow eval` imports, whether
+  `agentflow.json` exists and declares a valid `agent` key, and whether the
+  default port is free. Reported live through the timeline and again as a summary
+  table. Exits `1` on any failure and `0` otherwise (warnings do not fail the
+  run), so it works as a CI gate; nothing is written or changed.
+- `agentflow demo`: preview the animation, timeline, and progress states without
+  touching project state.
+- Cross-platform `agentflow config list|get|set|unset|path|validate` user
+  preferences, stored as JSON in the per-user config directory. `output.format`,
+  `output.color`, and `output.progress` are read at startup as defaults; explicit
+  flags still win.
+- Reproducible `agentflow init --non-interactive` recipes and `--dry-run` previews.
+- Stable CLI error codes and dependency recovery suggestions.
+- `py.typed` marker, so type information now reaches consumers (PEP 561).
+- `--integration` pytest flag gating tests marked `integration` that require real
+  Redis/Postgres, so a default `pytest` run needs no external services.
+- mypy configuration (`[tool.mypy]`) and a mypy step in CI.
+- CodeQL static analysis workflow.
+- Dependabot configuration for pip and GitHub Actions updates.
+- Community health files: `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`,
+  `RELEASE_NOTES.md`, issue forms, and a pull request template.
+- `Changelog` entry in project URLs.
+
+### Changed
+
+- Command implementations are loaded lazily, so a broken optional feature no longer
+  prevents root help, version, completion, or unrelated commands from starting.
+- CLI logging now uses one invocation-wide handler, so quiet and verbose levels apply
+  consistently without duplicate records.
+- Project configuration discovery now walks parent directories from the current
+  working directory.
+- Init, build, and eval status output now flows through the shared renderer instead of
+  writing raw ANSI control sequences.
+- **The full-screen session no longer erases the command's output.** It used to
+  hold the alternate screen through a Rich live display, which re-homes the
+  cursor before every write — so each line overwrote the last — and then released
+  the screen on exit, which a terminal handles by discarding everything drawn on
+  it. Short commands showed a flash of nothing. The frame now switches the buffer
+  directly and pauses on a closing hint before letting go.
+- The screen is claimed lazily, by the first command that renders a header.
+  Script-shaped invocations (`--version`, `config get`, `--format json`) never
+  take over the terminal or pause on exit.
+- A console that reports itself as a terminal but refuses the alternate buffer
+  (legacy Windows console) now aborts the frame before anything is written,
+  rather than leaving a scrolling region on the user's real scrollback.
+- **A terminal that cannot host a prompt no longer crashes the command.**
+  `stdin.isatty()` is true under MSYS/Cygwin shells on Windows, but
+  prompt-toolkit cannot attach to a console there and raises — which surfaced as
+  `AF-INTERNAL-001: Unexpected error: Found xterm-256color, while expecting a
+  Windows console`. Prompt availability is now probed, so such a terminal counts
+  as non-interactive and gets the usual "pass --agent or --all" guidance.
+- Pinned chrome is repainted after each prompt. Prompt-toolkit erases from the
+  cursor to the end of the *screen*, which reaches past the scrolling region and
+  took the footer with it.
+- One Rich `Console` is now reused per stream. Rebuilding it per call meant a live
+  display could not tell that ordinary prints belonged to it, so background output
+  collided with spinners and progress bars instead of scrolling above them.
+- `agentflow init` no longer prints one line per scaffolded file; files stream through
+  the active timeline row instead.
+
+### Fixed
+
+- **Scaffolding templates were missing from the wheel.** The `package-data` globs only
+  matched `*.json/*.yaml/*.yml/*.md/*.txt`, silently dropping
+  `templates/dev/.env.example`, `templates/prod/.env.example`,
+  `templates/prod/.python-version`, and `templates/prod/pyproject.toml`. `agentflow init`
+  failed for anyone installing from PyPI. Packaging now ships the package tree wholesale.
+- `agentflow version` reported `unknown` for the package version when installed from a
+  wheel, because it read `pyproject.toml` from a path that does not exist in an installed
+  distribution. It now resolves from installed distribution metadata and additionally
+  reports the core `10xscale-agentflow` version.
+- The `prod` template shipped `.pre-commot-config.yaml` (typo), so `pre-commit` found no
+  config in scaffolded projects. Renamed to `.pre-commit-config.yaml`.
+- Branch coverage is now measured by the default `pytest` invocation (`--cov-branch`),
+  not only in the CI-specific command.
+
+### Changed
+
+- **Every runtime dependency now has a lower bound**, and pre-1.0 / major-version-risky
+  dependencies have an upper cap (`pydantic>=2.13,<3`, `fastapi>=0.116,<1.0`,
+  `10xscale-agentflow>=0.9.0,<2.0`, and so on). Previously all runtime dependencies were
+  unpinned, so a major release of any of them could break installs without warning.
+- Optional extras `snowflakekit`, `redis`, and `jwt` gained bounds.
+- CI now runs on pushes to `main` as well as pull requests, and covers both advertised
+  Python versions (3.12 and 3.13) rather than 3.13 alone.
+- The release workflow now depends on a passing test job; it no longer builds and
+  publishes untested code.
+- `Documentation` URL points at the published docs site instead of a Read the Docs URL
+  that was never provisioned.
+
+### Removed
+
+- `agentflow_cli/src/app/routers/a2a.py` and `a2ui.py`. Both were entirely commented out,
+  never mounted by `setup_router.init_routes`, and shipped in the wheel as dead code.
+  They can be restored from git history when the A2A surface is actually implemented.
+- Design and planning notes from the repository root (`AUTHORIZATION_PLAN.md`,
+  `AUTHORIZATION_PLAN_PHASE2.md`, `AGENTFLOW_JSON.md`, `CUSTOM_AUTH.md`).
+
+---
+
+## [0.5.0]
+
+Initial entry in this changelog. Releases before `0.5.0` were not tracked here; see the
+GitHub release history for their notes.
+
+[Unreleased]: https://github.com/10xGraph/10xgraph-api/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/10xGraph/10xgraph-api/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/10xGraph/10xgraph-api/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/10xHub/agentflow-cli/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/10xHub/agentflow-cli/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/10xHub/agentflow-cli/releases/tag/v0.5.0

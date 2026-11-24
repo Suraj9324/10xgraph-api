@@ -1,0 +1,455 @@
+[build-system]
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "10xgraph-api"
+version = "1.0.0"
+description = "API server and CLI of 10xGraph (formerly 10xscale-agentflow-cli), open-source self-hosted infrastructure for AI applications: REST, streaming and WebSocket from your graph, JWT or custom auth, roles with own/tenant/all reach, tenant isolation, rate limits, background jobs, metrics, audit log, and Docker and Kubernetes files. MIT."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+authors = [
+    {name = "Shudipto Trafder", email = "shudiptotrafder@gmail.com"},
+]
+maintainers = [
+    {name = "Shudipto Trafder", email = "shudiptotrafder@gmail.com"},
+    {name = "10xScale", email = "contact@10xscale.ai"},
+]
+keywords = [
+    "10xgraph",
+    "10xscale",
+    "agentflow",
+    "agents",
+    "ai-agents",
+    "multi-agent",
+    "agent-server",
+    "agent-deployment",
+    "llm",
+    "fastapi",
+    "api-server",
+    "rest-api",
+    "sse",
+    "websocket",
+    "realtime-audio",
+    "ag-ui",
+    "jwt",
+    "authentication",
+    "authorization",
+    "rbac",
+    "multi-tenant",
+    "rate-limiting",
+    "self-hosted",
+    "production",
+    "docker",
+    "kubernetes",
+    "cli",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+]
+dependencies = [
+    # Core 1.x (import `tenxgraph`); major.minor moves in lockstep with this package.
+    "10xgraph>=1.0.0,<2.0",
+    # Pre-1.0 and major-version-risky deps are capped; floors are the versions
+    # the suite is verified against.
+    "fastapi>=0.116,<1.0",
+    "injectq>=0.7.0,<0.8",
+    "python-multipart>=0.0.31,<0.1",
+    "starlette>=1.3.1",
+    "pydantic>=2.13,<3",
+    "pydantic-settings>=2.3,<3",
+    "uvicorn>=0.36,<1.0",
+    "typer>=0.17,<1.0",
+    "python-dotenv>=1.0,<2",
+    "questionary>=2.0,<3",
+    "rich>=14.0,<15",
+]
+
+[project.urls]
+Homepage = "https://10xgraph.com"
+Repository = "https://github.com/10xGraph/10xgraph-api"
+Issues = "https://github.com/10xGraph/10xgraph-api/issues"
+Documentation = "https://10xgraph.com"
+Changelog = "https://github.com/10xGraph/10xgraph-api/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+sentry = [
+    "sentry-sdk>=2.10.0",
+]
+firebase = [
+    "firebase-admin>=6.5.0",
+    "oauth2client>=4.1.3",
+]
+snowflakekit = [
+    "snowflakekit>=0.1.1,<1.0",
+]
+redis = [
+    "redis>=5.0.7,<9",
+]
+jobs = [
+    "taskiq>=0.13.0",
+    "taskiq-redis>=1.2.4",
+]
+# RabbitMQ and Kafka store no results: the result backend and schedules stay on Redis.
+jobs-rabbitmq = [
+    "taskiq>=0.13.0",
+    "taskiq-redis>=1.2.4",
+    "taskiq-aio-pika>=0.6.1",
+]
+jobs-kafka = [
+    "taskiq>=0.13.0",
+    "taskiq-redis>=1.2.4",
+    "taskiq-aio-kafka>=1.0.0",
+]
+jwt = [
+    "PyJWT>=2.15.0,<3",
+]
+media = [
+    "textxtract[pdf,docx,html,xml,md]>=0.2.0",
+]
+# Pillow for image resize / EXIF / format conversion in core's media processor.
+# Without it, uploaded images pass through unchanged.
+images = [
+    "10xgraph[images]>=1.0.0,<2.0",
+]
+gcloud = [
+    "google-cloud-logging",
+]
+otel = [
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-instrumentation-fastapi>=0.40b0",
+    "opentelemetry-exporter-otlp>=1.20.0",
+]
+# Metrics export (OTLP push or Prometheus scrape); floors are the tested versions.
+metrics = [
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-instrumentation-fastapi>=0.66b2",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.2",
+    "opentelemetry-exporter-prometheus>=0.66b2",
+    "prometheus-client>=0.26.0",
+]
+ag-ui = [
+    "ag-ui-protocol>=1.0,<2",
+]
+# WebSocket streaming (/v1/graph/ws) and realtime audio (/v1/graph/live). Uvicorn needs a
+# WebSocket library to serve them; set "websocket": {"enabled": false} to run without one.
+websocket = [
+    "websockets>=13.0,<17",
+]
+
+[project.scripts]
+10xgraph = "tenxgraph_api.cli.main:main"
+# Deprecated alias for the pre-rename command name; removed in 2.0.
+agentflow = "tenxgraph_api.cli.main:legacy_main"
+
+[tool.setuptools]
+zip-safe = false
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tenxgraph_api*", "agentflow_cli*"]
+exclude = ["tests*", "docs*", "__pycache__*"]
+
+[tool.setuptools.package-data]
+# `**/*` (not extension globs) so scaffolding dotfiles - .env.example,
+# .python-version - and templates/prod/pyproject.toml reach the wheel.
+# Without them `10xgraph init` fails on a PyPI install.
+"tenxgraph_api" = ["py.typed", "**/*"]
+
+[tool.setuptools.exclude-package-data]
+# Tool caches that appear if the prod template is ever run in place.
+"*" = [
+    "**/.ruff_cache/**",
+    "**/.pytest_cache/**",
+    "**/.mypy_cache/**",
+    "**/htmlcov/**",
+    "**/*.py[cod]",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+lint.fixable = ["ALL"]
+lint.select = [
+    "E",   # pycodestyle
+    "W",   # pycodestyle
+    "F",   # Pyflakes
+    "PL",  # pylint
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "A",   # flake8-builtins
+    "S",   # flake8-bandit
+    "ISC", # flake8-implicit-str-concat
+    "ICN", # flake8-import-conventions
+    "PIE", # flake8-pie
+    "Q",   # flake8-quotes
+    "RET", # flake8-return
+    "SIM", # flake8-simplify
+    "TID", # flake8-tidy-imports
+    "RUF", # Ruff-specific rules
+    "YTT", # flake8-2020
+    "UP",  # pyupgrade
+    "C4",  # flake8-comprehensions
+    "PTH", # flake8-use-pathlib
+    "G",   # flake8-logging-format
+    "INP", # flake8-no-pep420
+    "T20", # flake8-print
+]
+lint.ignore = [
+    "UP006", # https://github.com/charliermarsh/ruff/pull/4427
+    "UP007", # https://github.com/charliermarsh/ruff/pull/4427
+    # Mutable class attributes should be annotated with `typing.ClassVar`
+    # Too many violations
+    "RUF012",
+    # Logging statement uses f-string
+    "G004",
+    #B904 Within an `except` clause, raise exceptions with
+    #`raise ... from err` or `raise ... from None` to distinguish
+    #them from errors in exception handling
+    "B904",
+    #Do not perform function call `Injected` in argument defaults
+    "B008",
+    "ISC001",# flake8-implicit-str-concat
+]
+# Allow unused variables when underscore-prefixed.
+lint.dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+exclude = [
+    "venv",
+    ".venv",
+    # Emitted scaffolding, not library code. These paths must match from the repo
+    # root - the previous `*/10xgraph-api/...` patterns had a hyphen typo and a
+    # leading `*/`, so neither ever matched and templates were being linted.
+    "tenxgraph_api/cli/templates",
+]
+
+
+[tool.ruff.lint.mccabe]
+# Unlike Flake8, default to a complexity level of 10.
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+# Patterns are matched against paths relative to the repo root. A leading `*/`
+# never matches a top-level directory, which is why these previously had no effect.
+"bin/**" = ["E402", "S603", "T201", "S101"]
+"scripts/**" = ["E402", "S603", "T201", "S101", "INP001"]
+"**/migrations/**" = ["E402", "S603", "T201", "S101"]
+"**/__init__.py" = ["E402", "S603", "T201", "S101", "F401"]
+# Test code: asserts, subprocess calls, prints, magic numbers, bound-but-unused
+# locals (the act/assert split), and long/complex test bodies are all normal.
+"tests/**" = [
+    "E402", "E501", "E722", "E731",
+    "S101", "S104", "S105", "S106", "S108", "S110", "S113", "S603", "S607",
+    "T201", "F841", "RET504", "SIM105", "SIM118", "SIM222",
+    "PTH109", "PTH123", "RUF013",
+    "PLR2004", "PLR0912", "PLR0913", "PLR0915", "INP001", "ARG001", "SIM117",
+]
+# Examples are illustrative scripts: they print, they are not a package, and
+# they hardcode demo values on purpose.
+"examples/**" = [
+    "T201", "INP001", "PLR2004", "S104", "S105", "RET504", "E501",
+]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+known-first-party = ["src"]
+[tool.ruff.lint.pylint]
+max-args = 10
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+files = ["tenxgraph_api"]
+# Templates are emitted code, not library code - they reference modules that only
+# exist in a scaffolded project.
+exclude = "^tenxgraph_api/cli/templates/"
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_redundant_casts = true
+warn_unused_ignores = false
+no_implicit_optional = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+show_error_codes = true
+# injectq types get/try_get as type[T]; mypy rejects abstract base classes there.
+disable_error_code = ["type-abstract"]
+pretty = true
+
+[[tool.mypy.overrides]]
+module = ["tenxgraph_api.cli.templates.*"]
+ignore_errors = true
+
+# --- Phased adoption backlog -------------------------------------------------
+# mypy was introduced in the 0.5.0 readiness pass against a codebase that had
+# never been type checked. Everything not listed here is checked and clean, so
+# CI fails on any *new* type error. Work these modules off the list one at a
+# time; do not add to it.
+#
+#   graph_service.py            14 errors (call-arg, union-attr)
+#   multimodal_preprocessor.py   7 errors (union-attr, arg-type)
+#   permissions.py               5 errors (type-abstract from the InjectAPI
+#                                          pattern - likely needs a Protocol)
+#   auth_backend.py              3 errors (call-arg)
+#   eval.py                      3 errors (list invariance; use Sequence)
+#   graph/router.py              2 errors (type-abstract, same as permissions)
+#   settings/media_settings/
+#   setup_middleware.py          1 error each (assignment, var-annotated)
+[[tool.mypy.overrides]]
+module = [
+    "tenxgraph_api.src.app.routers.graph.services.graph_service",
+    "tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor",
+    "tenxgraph_api.src.app.routers.graph.router",
+    "tenxgraph_api.src.app.routers.graph.ws",
+    "tenxgraph_api.src.app.routers.graph.live",
+    "tenxgraph_api.src.app.routers.graph.ws_frames",
+    "tenxgraph_api.src.app.routers.graph.services.run_checks",
+    "tenxgraph_api.src.app.routers.graph.services.streaming",
+    "tenxgraph_api.src.app.routers.graph.services.naming",
+    "tenxgraph_api.src.app.routers.graph.services.realtime",
+    "tenxgraph_api.src.app.routers.graph.services.introspection",
+    "tenxgraph_api.src.app.routers.graph.services.fix",
+    "tenxgraph_api.src.app.routers.graph.services.run_models",
+    "tenxgraph_api.src.app.routers.graph.services.stream_utils",
+    "tenxgraph_api.src.app.core.auth.permissions",
+    "tenxgraph_api.src.app.core.auth.auth_backend",
+    "tenxgraph_api.src.app.core.config.settings",
+    "tenxgraph_api.src.app.core.config.media_settings",
+    "tenxgraph_api.src.app.core.config.setup_middleware",
+    "tenxgraph_api.cli.commands.eval",
+]
+ignore_errors = true
+
+[tool.bandit]
+exclude_dirs = ["tests", "tenxgraph_api/cli/templates", ".venv", "venv"]
+skips = ["B101", "B611", "B601"]
+
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+
+[tool.pytest.ini_options]
+env = [
+    "ENVIRONMENT=pytest",
+    # Tests build the app without real backends; the startup gate has its own tests.
+    "STARTUP_CHECKS=false",
+]
+testpaths = [
+    "tests",
+]
+pythonpath = [
+    ".",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning"
+]
+addopts = [
+    # Limit coverage collection to the local project package only
+    "--cov=tenxgraph_api",
+    "--cov-report=html",
+    "--cov-report=term-missing",
+    "--cov-report=xml",
+    "--cov-branch",
+    "--cov-fail-under=80",
+    "--strict-markers",
+    "-v"
+]
+markers = [
+    "integration: requires real external services (Redis, Postgres); run with --integration",
+    "slow: takes more than a few seconds",
+]
+
+[tool.coverage.run]
+# Only measure the first-party project package
+source = ["tenxgraph_api"]
+branch = true
+omit = [
+    "*/__init__.py",           # often trivial
+    "*/tests/*",               # exclude test code
+    "*/migrations/*",
+    "*/scripts/*",
+    "*/venv/*",
+    "*/.venv/*",
+    "*/tenxgraph_api/cli/templates/prod/*",
+    "*/tenxgraph_api/cli/templates/dev/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "if __name__ == '__main__':",
+    "pragma: no cover",
+    "@abc.abstractmethod",
+    "@abstractmethod",
+    "raise NotImplementedError",
+]
+show_missing = true
+
+[tool.coverage.paths]
+source = [
+    "tenxgraph_api",
+    "*/site-packages/tenxgraph_api",
+]
+
+[tool.pytest-env]
+ENVIRONMENT = "pytest"
+
+[tool.uv.sources]
+# Development and CI take core from GitHub main (uv only). The built wheel keeps the plain
+# `10xgraph>=1.0.0,<2.0` requirement from [project.dependencies]; release.yml builds with
+# --no-sources and fails if a git requirement reaches the metadata.
+# Before an API release that uses something only on core main, release core first and raise
+# the core floor in [project.dependencies] (and the dev group) to that version.
+10xgraph = { git = "https://github.com/10xGraph/10xGraph", branch = "main" }
+
+[tool.uv]
+# Core main still pins injectq<0.7; 0.7.0 fixes the optional-default bug (cleanup-review
+# INJECTQ_BUGS.md, bug 5). Remove once core main requires injectq>=0.7.0.
+override-dependencies = ["injectq>=0.7.0,<0.8"]
+
+[dependency-groups]
+dev = [
+    "10xgraph>=1.0.0,<2.0",
+    "snowflakekit",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "pytest-cov>=7.0.0",
+    "pytest-env>=1.1.5",
+    "pytest-xdist>=3.8.0",
+    "hypothesis>=6.100.0",
+    "pre-commit>=3.8.0",
+    "mypy>=1.11.0",
+    "ruff==0.5.2",
+    "httpx==0.27.0",
+    "requests==2.32.3",
+    "redis>=5.0.7",
+    "taskiq>=0.13.0",
+    "taskiq-redis>=1.2.4",
+    "taskiq-aio-pika>=0.6.1",
+    "taskiq-aio-kafka>=1.0.0",
+    "PyJWT",
+    "textxtract[pdf,docx,html,xml,md]>=0.2.0",
+    # The ag-ui extra, so the AG-UI router tests run in CI instead of failing.
+    "ag-ui-protocol>=1.0,<2",
+    # The production worker class (uvicorn_worker.py) and its shutdown tests import these;
+    # same ranges the generated Dockerfile installs.
+    "gunicorn>=23,<27",
+    "uvicorn-worker>=0.4,<1",
+]

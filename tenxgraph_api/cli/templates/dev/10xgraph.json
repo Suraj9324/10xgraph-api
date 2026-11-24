@@ -1,0 +1,16 @@
+{
+  "agent": "graph.agent:app",
+  "env": ".env",
+  "auth": null,
+  "remote_tools": [],
+  "ag_ui": {
+    "enabled": false
+  },
+  "thread_name_generator": null,
+  "evaluation": {
+    "directory": "evals",
+    "output_dir": "eval_reports",
+    "threshold": 0.75,
+    "timestamp_files": true
+  }
+}

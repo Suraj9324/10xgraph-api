@@ -1,0 +1,1442 @@
+"""Declarative description of every ``10xgraph.json`` option the editor shows.
+
+The browser page renders itself from :func:`build_schema`, so adding a new
+configuration key only needs a new entry here (plus a rule in ``validation``).
+
+Section shape::
+
+    {
+        "id": "observability",  # stable id, used by validation issues
+        "title": "Observability",
+        "subtitle": "...",  # optional second line in the sidebar
+        "description": "...",
+        "key": "observability",  # top-level key, or None for root-level fields
+        "optional": True,  # renders an on/off toggle for the whole key
+        "self_managed": False,  # True: no toggle, the widget adds and removes the key itself
+        "off_summary": "...",  # what happens while the key is absent
+        "default": {...},  # value written when the toggle is switched on
+        "widget": None,  # custom renderer: "auth", "remote_tools",
+        # "cache_store", "id_generator", "thread_name_generator",
+        # "observability", "metrics", "audit"
+        "choices": [["value", "Label", "One line of help"]],  # widget sections with a dropdown
+        "fields": [...],  # generic fields, paths are relative to the root
+        "notes": ["..."],  # extra hints (secrets that belong in .env, ...)
+        "env": [{"name": "REDIS_URL", "purpose": "..."}],  # related variables, read-only
+    }
+
+Field shape::
+
+    {
+        "path": ["runs", "timeout"],
+        "label": "Timeout",
+        "type": "text" | "number" | "bool" | "select" | "list",
+        "help": "...",
+        "placeholder": "...",
+        "options": [...],  # select only
+        "min": 0,
+        "step": 1,  # number only
+        "required": False,
+        "default": ...,  # value the server assumes when the key is absent
+        "unset_label": "...",  # offer a choice that removes the key; says what the server does
+        "allow_true": False,  # bool only: render just Default / Off, never On
+        "unlimited_value": 0,  # number only: an "Unlimited" checkbox that writes this value
+        "null_label": "No limit",  # number only: a choice that writes JSON null
+        "exclusive_min": 0,  # number only: the value must be greater than this
+        "group": "Limits",  # fields sharing a group render together
+        "managed": False,  # True: only the section's widget renders it
+        "show_if": {"path": [...], "equals": value},
+    }
+
+``build_schema()`` also returns ``environment``: server environment variable groups that are
+not tied to one section, as ``[{"title": ..., "vars": [{"name": ..., "purpose": ...}]}]``.
+A group may also carry an optional ``note`` (a short string shown under the group title).
+The editor only lists names; it never reads a ``.env`` file.
+"""
+
+from __future__ import annotations
+
+import copy
+from typing import Any
+
+from tenxgraph_api.src.app.core.auth.permissions_registry import REGISTRY, TOOLS
+from tenxgraph_api.src.app.core.config.graph_config import (  # noqa: F401  (re-exported)
+    ID_GENERATOR_NAMES,
+    THREAD_NAME_CHOICES,
+)
+
+
+DOCS_URL = "https://10xgraph.com/docs/reference/api-cli/configuration"
+
+# Keys read by the CLI or the API server. Anything else is preserved but flagged.
+KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
+    {
+        "agent",
+        "env",
+        "auth",
+        "authorization",  # removed; check_auth_config reports it with a pointer to auth.roles
+        "cache_store",
+        "id_generator",
+        "websocket",
+        "runs",
+        "ag_ui",
+        "media",
+        "observability",
+        "metrics",
+        "audit",
+        "injectq",
+        "store",
+        "store_allow_tenant_mismatch",
+        "thread_name_generator",
+        "remote_tools",
+        "test",
+        "evaluation",
+        "worker",
+    }
+)
+
+_SECTIONS: list[dict[str, Any]] = [
+    {
+        "id": "core",
+        "title": "Core",
+        "description": "The compiled graph the server runs and the dotenv file it loads.",
+        "key": None,
+        "optional": False,
+        "fields": [
+            {
+                "path": ["agent"],
+                "label": "Agent graph",
+                "type": "text",
+                "required": True,
+                "placeholder": "graph.react:app",
+                "help": "Import path of the compiled graph, as module:attribute.",
+            },
+            {
+                "path": ["env"],
+                "label": "Env file",
+                "type": "text",
+                "placeholder": ".env",
+                "help": "Dotenv file loaded before the graph starts. Leave empty to skip.",
+            },
+        ],
+    },
+    {
+        "id": "auth",
+        "title": "Auth",
+        "description": (
+            "Who is calling the API and what each caller may do. Leave the method on None for "
+            "local development."
+        ),
+        "key": "auth",
+        "optional": False,
+        "off_summary": "Every request is accepted without authentication.",
+        "widget": "auth",
+        "fields": [],
+        # The permission picker reads this, so the UI never hard-codes a permission.
+        # ``tools`` has open actions (tool names), so it only suggests ``tools:*``.
+        "registry": {
+            **{resource: list(actions) for resource, actions in REGISTRY.items()},
+            TOOLS: [],
+        },
+        "notes": [
+            "JWT needs JWT_SECRET_KEY and JWT_ALGORITHM in your .env file.",
+            "Custom auth points at a BaseAuth subclass, as module:attribute.",
+        ],
+        "env": [
+            {
+                "name": "JWT_SECRET_KEY",
+                "purpose": "Signing secret for JWT tokens. Required when auth is jwt.",
+            },
+            {
+                "name": "JWT_ALGORITHM",
+                "purpose": "Signing algorithm for JWT tokens. Defaults to HS256.",
+            },
+            {
+                "name": "JWT_ISSUER",
+                "purpose": (
+                    "Unset: the issuer is not checked. Set: a token must carry a matching iss "
+                    "claim, or it is refused with 401."
+                ),
+            },
+            {
+                "name": "JWT_AUDIENCE",
+                "purpose": (
+                    "Unset: a token without aud is accepted, but a token that carries aud is "
+                    "refused. Set: a token must carry a matching aud claim, or it is refused "
+                    "with 401. Set both in production when your signing key also issues tokens "
+                    "for other services."
+                ),
+            },
+        ],
+    },
+    {
+        "id": "cache_store",
+        "title": "Cache store",
+        "subtitle": "rate limiting, token revocation",
+        "description": (
+            "Shared state between workers: run locks, idempotency, ownership cache, rate limits "
+            "and token revocations."
+        ),
+        "key": "cache_store",
+        "optional": False,
+        "widget": "cache_store",
+        "fields": [
+            {
+                "path": ["cache_store", "type"],
+                "managed": True,
+                "default": "memory",
+                "label": "Type",
+                "type": "select",
+                "options": ["memory", "redis", "custom"],
+                "help": (
+                    "memory keeps state in this process. redis and custom share it between workers."
+                ),
+            },
+            {
+                "path": ["cache_store", "url"],
+                "managed": True,
+                "label": "Redis URL",
+                "type": "text",
+                "placeholder": "Empty: uses REDIS_URL",
+                "help": (
+                    "Leave empty to use the REDIS_URL environment variable. To use a different "
+                    "Redis, set the URL here, as a value or a variable such as "
+                    "${CACHE_REDIS_URL}. Works with Redis, Valkey, Dragonfly and KeyDB."
+                ),
+            },
+            {
+                "path": ["cache_store", "path"],
+                "managed": True,
+                "label": "Cache store class",
+                "type": "text",
+                "required": True,
+                "placeholder": "graph.dependencies:cache_store",
+                "help": ("module:attr of a BaseCacheStore instance or a zero-argument factory."),
+            },
+            {
+                "path": ["cache_store", "rate_limit", "requests"],
+                "managed": True,
+                "group": "Limits",
+                "label": "Requests per window",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "placeholder": "100",
+            },
+            {
+                "path": ["cache_store", "rate_limit", "window"],
+                "managed": True,
+                "group": "Limits",
+                "label": "Window (seconds)",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "placeholder": "60",
+            },
+            {
+                "path": ["cache_store", "rate_limit", "by"],
+                "managed": True,
+                "group": "Limits",
+                "default": "ip",
+                "label": "Limit by",
+                "type": "select",
+                "options": ["ip", "user", "global"],
+                "help": "Count requests per client IP, per authenticated user, or all together.",
+            },
+            {
+                "path": ["cache_store", "rate_limit", "fail_open"],
+                "managed": True,
+                "group": "Limits",
+                "default": True,
+                "label": "Fail open",
+                "type": "bool",
+                "help": (
+                    "Allow requests while the cache store errors. Off means deny them with 503 "
+                    "RATE_LIMIT_UNAVAILABLE, and the server refuses to start without it."
+                ),
+            },
+            {
+                "path": ["cache_store", "rate_limit", "trusted_proxy_headers"],
+                "managed": True,
+                "group": "Proxy",
+                "default": False,
+                "label": "Trust X-Forwarded-For",
+                "type": "bool",
+                "help": "Only when the app sits behind a proxy you control.",
+            },
+            {
+                "path": ["cache_store", "rate_limit", "trusted_proxy_hops"],
+                "managed": True,
+                "group": "Proxy",
+                "label": "Trusted proxy hops",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "placeholder": "1",
+                "show_if": {
+                    "path": ["cache_store", "rate_limit", "trusted_proxy_headers"],
+                    "equals": True,
+                },
+            },
+            {
+                "path": ["cache_store", "rate_limit", "trusted_proxies"],
+                "managed": True,
+                "group": "Proxy",
+                "label": "Trusted proxy networks",
+                "type": "list",
+                "placeholder": "10.0.0.0/8",
+                "help": (
+                    "IPs or CIDR ranges your proxy connects from. X-Forwarded-For is ignored "
+                    "for anyone else, so clients that reach the app directly cannot spoof it. "
+                    "Empty means loopback and private networks only."
+                ),
+                "show_if": {
+                    "path": ["cache_store", "rate_limit", "trusted_proxy_headers"],
+                    "equals": True,
+                },
+            },
+            {
+                "path": ["cache_store", "rate_limit", "exclude_paths"],
+                "managed": True,
+                "group": "Excluded paths",
+                "label": "Extra paths to skip",
+                "type": "list",
+                "placeholder": "/docs",
+                "help": (
+                    "Paths that are never rate limited. /ping and /health/ready are always "
+                    "skipped. API docs paths (/docs, /redocs, /openapi.json) are limited unless "
+                    "listed here. The server default is an empty list."
+                ),
+            },
+            {
+                "path": ["cache_store", "token_revocation", "token_lifetime"],
+                "managed": True,
+                "label": "Token lifetime (seconds)",
+                "type": "number",
+                "exclusive_min": 0,
+                "step": 1,
+                "placeholder": "3600",
+                "help": "Longest lifetime of the tokens you issue.",
+            },
+            {
+                "path": ["cache_store", "token_revocation", "user_ttl"],
+                "managed": True,
+                "default": 2592000,
+                "label": "User revocation kept (seconds)",
+                "type": "number",
+                "exclusive_min": 0,
+                "step": 1,
+                "null_label": "Until deleted",
+                "help": "How long a revoke --user entry is kept by default.",
+            },
+        ],
+        "env": [
+            {
+                "name": "REDIS_URL",
+                "purpose": "The Redis URL when the cache store type is redis and "
+                "cache_store.url is empty. It does not select a store on its own.",
+            },
+        ],
+    },
+    {
+        "id": "websocket",
+        "title": "WebSocket",
+        "description": (
+            "WebSocket streaming and realtime audio, and caps on concurrent connections "
+            "(shared between workers with a shared cache store, per process otherwise)."
+        ),
+        "key": "websocket",
+        "optional": True,
+        "off_summary": (
+            "/v1/graph/ws and /v1/graph/live stay mounted with the default caps "
+            "(1000 connections, 10 per user)."
+        ),
+        "default": {"max_connections": 1000, "max_connections_per_user": 10},
+        "fields": [
+            {
+                "path": ["websocket", "enabled"],
+                "label": "Enabled",
+                "type": "bool",
+                "unset_label": (
+                    "Default: routes stay mounted; only a warning if the websockets package "
+                    "is missing"
+                ),
+                "help": (
+                    "On mounts /v1/graph/ws and /v1/graph/live and refuses to start without "
+                    'the websockets package (pip install "10xgraph-api[websocket]"). Off: '
+                    "neither route exists."
+                ),
+            },
+            {
+                "path": ["websocket", "max_connections"],
+                "label": "Max connections",
+                "type": "number",
+                "min": 0,
+                "step": 1,
+                "placeholder": "1000",
+                "unlimited_value": 0,
+                "help": (
+                    "Per worker process unless the cache store is shared. Defaults to 1000; 0 "
+                    "or null means unlimited."
+                ),
+            },
+            {
+                "path": ["websocket", "max_connections_per_user"],
+                "label": "Max connections per user",
+                "type": "number",
+                "min": 0,
+                "step": 1,
+                "placeholder": "10",
+                "unlimited_value": 0,
+                "help": (
+                    "Stops one account holding every slot. Defaults to 10; 0 or null means "
+                    "unlimited."
+                ),
+            },
+            {
+                "path": ["websocket", "realtime_models"],
+                "label": "Realtime models clients may pick",
+                "type": "list",
+                "placeholder": "gemini-3.8-live",
+                "help": (
+                    "Models a /v1/graph/live client may request. Any other request uses the "
+                    "agent's own model. Empty means clients cannot choose."
+                ),
+            },
+            {
+                "path": ["websocket", "realtime_client_overrides"],
+                "label": "Realtime options clients may set",
+                "type": "list",
+                "placeholder": "voice",
+                "default": ["voice", "modalities", "vad"],
+                "help": (
+                    "Init-frame options a /v1/graph/live client may set: voice, modalities, vad, "
+                    "system_prompt. Defaults to voice, modalities and vad. Add system_prompt "
+                    "only if every caller may rewrite the agent's instructions."
+                ),
+            },
+        ],
+    },
+    {
+        "id": "runs",
+        "title": "Runs",
+        "description": "Who names threads, which client input reaches the graph, and run limits.",
+        "key": "runs",
+        "optional": True,
+        "off_summary": (
+            "The server picks new thread ids, any non-reserved config key reaches the graph, "
+            "each user may hold 10 HTTP runs at once, and runs have no time limit. "
+            "Client state keys are set in their own section."
+        ),
+        "default": {"thread_ids": "server", "max_concurrent_per_user": 10},
+        "fields": [
+            {
+                "path": ["runs", "thread_ids"],
+                "label": "New thread ids",
+                "type": "select",
+                "options": ["client", "server"],
+                "default": "server",
+                "help": (
+                    "server (default): a request may only name a thread that exists, so nobody "
+                    "can claim an id before its owner. New threads are started without an id. "
+                    "AG-UI and realtime clients still pick their own ids. client: any request "
+                    "may start a thread under an id it picks."
+                ),
+            },
+            {
+                "path": ["runs", "config_keys"],
+                "label": "Allowed config keys",
+                "type": "list",
+                "placeholder": "locale",
+                "help": (
+                    "When set, a request config with any other key is rejected. thread_id is "
+                    "always allowed. Empty means any non-reserved key."
+                ),
+            },
+            {
+                "path": ["runs", "max_concurrent_per_user"],
+                "label": "Max concurrent runs per user",
+                "type": "number",
+                "min": 0,
+                "step": 1,
+                "placeholder": "10",
+                "default": 10,
+                "unlimited_value": 0,
+                "help": (
+                    "HTTP runs in flight per user (per process unless the cache store is "
+                    "shared). 0 or null means unlimited."
+                ),
+            },
+            {
+                "path": ["runs", "timeout"],
+                "label": "Run timeout (seconds)",
+                "type": "number",
+                "exclusive_min": 0,
+                "null_label": "No limit",
+                "step": 1,
+                "help": (
+                    "A run that takes longer is cancelled. Must be greater than 0; decimals "
+                    "are allowed. Empty uses the default: 300 in production (MODE=production), "
+                    "no limit in development. No limit writes null, which also removes the "
+                    "production limit."
+                ),
+            },
+            {
+                "path": ["runs", "max_parallel_tool_calls"],
+                "label": "Max parallel tool calls",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "placeholder": "10",
+                "help": (
+                    "Tool calls one model turn may run at once. Empty uses core's default, "
+                    "10, or the TENXGRAPH_MAX_PARALLEL_TOOL_CALLS environment variable."
+                ),
+            },
+        ],
+        "env": [
+            {
+                "name": "TENXGRAPH_MAX_PARALLEL_TOOL_CALLS",
+                "purpose": (
+                    "Tool calls one turn may run at once when max_parallel_tool_calls is "
+                    "not set above."
+                ),
+            },
+            {
+                "name": "MODE",
+                "purpose": (
+                    "production gives runs a 300 second timeout when none is set above; "
+                    "development sets no limit."
+                ),
+            },
+        ],
+    },
+    {
+        "id": "state_keys",
+        "title": "Client state keys",
+        "description": (
+            "Which state keys a client may set. Denied by default: a key that is not listed "
+            "is refused with 422."
+        ),
+        "key": None,
+        "optional": False,
+        "fields": [
+            {
+                "path": ["runs", "state_keys"],
+                "label": "Allowed state keys",
+                "type": "list",
+                "placeholder": "preferences",
+                "help": (
+                    "State keys a client may set in initial_state, PUT state and AG-UI state. "
+                    "Empty: none."
+                ),
+            },
+        ],
+        "notes": [
+            "Saved under runs.state_keys in 10xgraph.json. Switching the Runs section back to "
+            "defaults removes it, which denies every key again.",
+        ],
+    },
+    {
+        "id": "ag_ui",
+        "title": "AG-UI",
+        "description": "Serve the graph over the AG-UI protocol, for clients such as CopilotKit.",
+        "key": "ag_ui",
+        "optional": True,
+        "off_summary": "The AG-UI endpoint (POST /v1/ag-ui) is not mounted.",
+        "default": {"enabled": True},
+        "fields": [
+            {
+                "path": ["ag_ui", "enabled"],
+                "default": False,
+                "label": "Enabled",
+                "type": "bool",
+                "help": "Mounts POST /v1/ag-ui. It uses the same auth as /v1/graph/stream.",
+            },
+            {
+                "path": ["ag_ui", "allow_client_tools"],
+                "default": True,
+                "label": "Allow client tools",
+                "type": "bool",
+                "help": (
+                    "Offer the tools a client sends (e.g. CopilotKit useFrontendTool) to the "
+                    "model for that run. Off: only tools listed in remote_tools."
+                ),
+            },
+        ],
+        "notes": [
+            'Needs the ag-ui extra: pip install "10xgraph-api[ag-ui]".',
+            "Client tools run in the caller's browser, cannot reuse a server tool's name, and are "
+            "size-limited.",
+        ],
+    },
+    {
+        "id": "media",
+        "title": "Uploaded files",
+        "description": "What happens to uploaded files when the messages that use them go away.",
+        "key": "media",
+        "optional": True,
+        "off_summary": "Files are deleted together with the last thread that uses them.",
+        "default": {"delete_with_thread": True},
+        "fields": [
+            {
+                "path": ["media", "delete_with_thread"],
+                "default": True,
+                "label": "Delete files with their thread",
+                "type": "bool",
+                "help": (
+                    "When the last message or thread that references an uploaded file is "
+                    "deleted, delete the file too. Off: nothing is deleted automatically "
+                    "(use DELETE /v1/files/{file_id}). Files uploaded before this setting "
+                    "existed are never deleted automatically."
+                ),
+            },
+        ],
+        "env": [
+            {
+                "name": "MEDIA_STORAGE_TYPE",
+                "purpose": "Where uploads are stored: memory, local or cloud. Defaults to local.",
+            },
+            {
+                "name": "MEDIA_STORAGE_PATH",
+                "purpose": "Upload folder when the storage type is local. Defaults to ./uploads.",
+            },
+            {
+                "name": "MEDIA_MAX_SIZE_MB",
+                "purpose": "Largest accepted upload in megabytes. Defaults to 25.",
+            },
+            {
+                "name": "DOCUMENT_HANDLING",
+                "purpose": (
+                    "How uploaded documents reach the model: extract_text, pass_raw or skip. "
+                    "Defaults to extract_text."
+                ),
+            },
+            {
+                "name": "MEDIA_ALLOWED_CONTENT_TYPES",
+                "purpose": (
+                    "Comma-separated upload allowlist such as image/*,application/pdf. "
+                    "Empty accepts any type."
+                ),
+            },
+            {
+                "name": "MEDIA_REQUIRE_OWNER",
+                "purpose": (
+                    "Deny files with no recorded owner. Unset means on in production, off in "
+                    "development."
+                ),
+            },
+            {
+                "name": "MEDIA_CLOUD_PROVIDER",
+                "purpose": "Cloud provider, aws or gcp. Used when the storage type is cloud.",
+            },
+            {
+                "name": "MEDIA_CLOUD_BUCKET",
+                "purpose": "Bucket name. Required when the storage type is cloud.",
+            },
+            {
+                "name": "MEDIA_CLOUD_REGION",
+                "purpose": "Bucket region. Defaults to us-east-1.",
+            },
+            {
+                "name": "MEDIA_CLOUD_PREFIX",
+                "purpose": "Key prefix for stored objects. Defaults to 10xgraph-media.",
+            },
+            {
+                "name": "MEDIA_CLOUD_ACCESS_KEY_ID",
+                "purpose": "Access key id for cloud storage.",
+            },
+            {
+                "name": "MEDIA_CLOUD_SECRET_ACCESS_KEY",
+                "purpose": "Secret access key for cloud storage.",
+            },
+            {
+                "name": "MEDIA_CLOUD_SESSION_TOKEN",
+                "purpose": "Temporary session token for cloud storage credentials.",
+            },
+            {
+                "name": "MEDIA_CLOUD_PROJECT_ID",
+                "purpose": "Project id when the cloud provider is gcp.",
+            },
+            {
+                "name": "MEDIA_CLOUD_CREDENTIALS_JSON",
+                "purpose": "Service account credentials as JSON for cloud storage.",
+            },
+            {
+                "name": "MEDIA_SIGNED_URL_TTL_SECONDS",
+                "purpose": "How long a signed download URL stays valid. Defaults to 3600.",
+            },
+        ],
+    },
+    {
+        "id": "observability",
+        "title": "AI tracing",
+        "description": (
+            "Traces of graph runs, LLM calls and tools, sent to the services you pick. "
+            "These are observability publishers: event publishers (Kafka, Redis, RabbitMQ) "
+            "are set in code. Never metrics: see Metrics for request rate and latency."
+        ),
+        "key": "observability",
+        "optional": True,
+        "off_summary": "Graph runs are not traced.",
+        "self_managed": True,
+        "default": {"level": "full", "user_id_mode": "raw"},
+        "widget": "observability",
+        "fields": [
+            {
+                "path": ["observability", "level"],
+                "group": "Tracing",
+                "managed": True,
+                "default": "full",
+                "label": "Level",
+                "type": "select",
+                "options": ["spans", "standard", "full"],
+                "help": (
+                    "full (default) records prompts, tool I/O and graph state and may contain "
+                    "PII. Use standard or spans to keep content out."
+                ),
+            },
+            {
+                "path": ["observability", "user_id_mode"],
+                "group": "Tracing",
+                "managed": True,
+                "default": "raw",
+                "label": "User id in traces",
+                "type": "select",
+                "options": ["raw", "hash", "mask"],
+                "help": (
+                    "raw sends the user id as is; hash sends a SHA-256 of it (keyed when "
+                    "TENXGRAPH_TRACE_USER_ID_KEY is set); mask hides the middle of it."
+                ),
+            },
+            {
+                "path": ["observability", "logfire", "service_name"],
+                "group": "Logfire",
+                "managed": True,
+                "label": "Service name",
+                "type": "text",
+                "placeholder": "my-agent",
+            },
+            {
+                "path": ["observability", "logfire", "send_to_logfire"],
+                "group": "Logfire",
+                "managed": True,
+                "default": True,
+                "label": "Send to Logfire",
+                "type": "bool",
+            },
+            {
+                "path": ["observability", "logfire", "console"],
+                "group": "Logfire",
+                "managed": True,
+                "label": "Print spans to console",
+                "type": "bool",
+                "unset_label": "Default: Logfire's own console behavior",
+                "allow_true": False,
+                "help": (
+                    "Only Default or Off work from this file. Logfire takes False or a "
+                    "ConsoleOptions object, which JSON cannot express, so true is rejected."
+                ),
+            },
+            {
+                "path": ["observability", "langsmith", "project"],
+                "group": "LangSmith",
+                "managed": True,
+                "label": "Project",
+                "type": "text",
+                "placeholder": "my-agent",
+            },
+            {
+                "path": ["observability", "langsmith", "endpoint"],
+                "group": "LangSmith",
+                "managed": True,
+                "label": "Endpoint",
+                "type": "text",
+                "placeholder": "https://api.smith.langchain.com/otel",
+            },
+            {
+                "path": ["observability", "phoenix", "project"],
+                "group": "Phoenix",
+                "managed": True,
+                "label": "Project",
+                "type": "text",
+                "placeholder": "my-agent",
+            },
+            {
+                "path": ["observability", "phoenix", "endpoint"],
+                "group": "Phoenix",
+                "managed": True,
+                "label": "Endpoint",
+                "type": "text",
+                "placeholder": "http://localhost:6006",
+                "help": "Base collector URL. /v1/traces is appended.",
+            },
+            {
+                "path": ["observability", "otlp", "use_metrics_endpoint"],
+                "group": "OTLP",
+                "managed": True,
+                "default": False,
+                "label": "Use the metrics endpoint",
+                "type": "bool",
+                "help": "Send traces to the same endpoint as the metrics.",
+            },
+            {
+                "path": ["observability", "otlp", "endpoint"],
+                "group": "OTLP",
+                "managed": True,
+                "label": "Endpoint",
+                "type": "text",
+                "placeholder": "http://collector:4318",
+                "help": (
+                    "Base URL of an OTLP HTTP receiver. /v1/traces is appended. Auth headers "
+                    "come from OTEL_EXPORTER_OTLP_HEADERS."
+                ),
+            },
+        ],
+        "notes": [],
+        "env": [
+            {
+                "name": "LOGFIRE_TOKEN",
+                "purpose": "Logfire write token. Needed to send spans to Logfire.",
+            },
+            {
+                "name": "LANGSMITH_API_KEY",
+                "purpose": "LangSmith API key. Required when LangSmith is enabled.",
+            },
+            {
+                "name": "PHOENIX_API_KEY",
+                "purpose": "Phoenix API key. Optional; a local Phoenix needs none.",
+            },
+            {
+                "name": "OTEL_EXPORTER_OTLP_HEADERS",
+                "purpose": "Auth headers for the OTLP destination, as key=value pairs.",
+            },
+            {
+                "name": "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                "purpose": "OTLP traces endpoint used when the OTLP endpoint field is empty.",
+            },
+            {
+                "name": "TENXGRAPH_TRACE_USER_ID_KEY",
+                "purpose": "Secret that keys the hash of user ids in traces when the mode is hash.",
+            },
+            {
+                "name": "OTEL_ENABLED",
+                "purpose": "Export OpenTelemetry traces from the API server (off unless set true)",
+            },
+            {
+                "name": "OTEL_LEVEL",
+                "purpose": "Detail of the OpenTelemetry traces: spans, standard or full (default).",
+            },
+            {
+                "name": "OTEL_SERVICE_NAME",
+                "purpose": "Service name on OpenTelemetry traces (10xgraph-api when unset).",
+            },
+            {
+                "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+                "purpose": "OTLP endpoint that receives the traces.",
+            },
+        ],
+    },
+    {
+        "id": "metrics",
+        "title": "Metrics",
+        "description": (
+            "Request rate, latency percentiles, errors and task throughput for Prometheus and "
+            "Grafana, from the API server and the worker. Never AI traces."
+        ),
+        "key": "metrics",
+        "optional": True,
+        "off_summary": "No metrics are exported.",
+        "default": {"enabled": True, "export": "otlp", "otlp": {"endpoint": None}},
+        "self_managed": True,
+        "widget": "metrics",
+        "fields": [
+            {
+                "path": ["metrics", "export"],
+                "managed": True,
+                "label": "Export metrics",
+                "type": "select",
+                "options": [
+                    ["otlp", "OTLP push (recommended for production)"],
+                    ["prometheus", "Prometheus scrape (single process)"],
+                ],
+            },
+            {
+                "path": ["metrics", "otlp", "endpoint"],
+                "managed": True,
+                "label": "OTLP endpoint",
+                "type": "text",
+                "placeholder": "http://collector:4318",
+                "help": (
+                    "Base URL of an OTLP HTTP receiver. /v1/metrics is appended. For Prometheus "
+                    "use http://prometheus:9090/api/v1/otlp, started with "
+                    "--web.enable-otlp-receiver. Auth headers come from "
+                    "OTEL_EXPORTER_OTLP_HEADERS."
+                ),
+            },
+            {
+                "path": ["metrics", "prometheus", "path"],
+                "managed": True,
+                "default": "/metrics",
+                "label": "Scrape path",
+                "type": "text",
+                "placeholder": "/metrics",
+                "help": "Route on the API server that Prometheus scrapes.",
+            },
+            {
+                "path": ["metrics", "prometheus", "worker_port"],
+                "managed": True,
+                "default": 9464,
+                "label": "Worker port",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "help": "Port where each worker serves its own metrics.",
+            },
+            {
+                "path": ["metrics", "latency_buckets_ms"],
+                "managed": True,
+                "default": [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000],
+                "label": "Latency buckets (ms)",
+                "type": "list",
+                "placeholder": "250",
+                "help": "Upper bounds of the latency histogram buckets, ascending.",
+            },
+        ],
+        "env": [
+            {
+                "name": "OTEL_EXPORTER_OTLP_HEADERS",
+                "purpose": "Auth headers for OTLP push and OTLP tracing, as key=value pairs.",
+            },
+            {
+                "name": "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+                "purpose": "OTLP metrics endpoint used when the endpoint field is empty.",
+            },
+            {
+                "name": "OTEL_SERVICE_NAME",
+                "purpose": "Service name on metrics (10xgraph-api when unset).",
+            },
+        ],
+    },
+    {
+        "id": "audit",
+        "title": "Audit log",
+        "description": (
+            "Who accessed or changed which data, when, and whether it was allowed. Ids and "
+            "results only, never prompts, answers or file contents."
+        ),
+        "key": "audit",
+        "optional": True,
+        "off_summary": "No audit events are recorded.",
+        "default": {"enabled": True, "sinks": ["log"], "include_reads": True},
+        "self_managed": True,
+        "widget": "audit",
+        "fields": [
+            {
+                "path": ["audit", "enabled"],
+                "managed": True,
+                "label": "Record an audit log",
+                "type": "bool",
+            },
+            {
+                "path": ["audit", "sinks"],
+                "managed": True,
+                "label": "Sinks",
+                "type": "list",
+                "placeholder": "my_pkg.audit:MySink",
+                "help": 'Where events go: "log", "publisher", or a "module:Class" sink.',
+            },
+            {
+                "path": ["audit", "include_reads"],
+                "managed": True,
+                "label": "Include allowed reads",
+                "type": "bool",
+                "help": "Off keeps denials, auth failures and changes only.",
+            },
+        ],
+        "env": [
+            {
+                "name": "LOG_FORMAT",
+                "purpose": ("json writes every log line as one JSON object; use in production."),
+            },
+        ],
+    },
+    {
+        "id": "id_generator",
+        "title": "ID generation",
+        "description": "How thread, message and memory ids are made.",
+        "key": None,
+        "optional": False,
+        "widget": "id_generator",
+        "choices": [
+            ["uuid", "uuid", "UUID version 4 strings."],
+            ["hex", "hex", "32-character hexadecimal strings."],
+            ["short", "short", "8-character alphanumeric strings."],
+            ["int", "int", "32-bit random integers."],
+            ["bigint", "bigint", "Big integers from the current time in nanoseconds."],
+            ["timestamp", "timestamp", "Integers from the current time in microseconds."],
+            [
+                "snowflake",
+                "snowflake",
+                "Time-ordered 64-bit integers that are unique across machines.",
+            ],
+        ],
+        "fields": [
+            {
+                "path": ["id_generator"],
+                "managed": True,
+                "label": "ID generator",
+                "type": "text",
+                "placeholder": "graph.ids:MyIdGenerator",
+                "help": (
+                    "module:attr of a BaseIDGenerator instance, subclass or zero-argument factory."
+                ),
+            },
+        ],
+        "notes": [
+            "snowflake needs the snowflakekit extra and reads the SNOWFLAKE_* variables.",
+            "Integer ids (int, bigint, snowflake, timestamp) need PgCheckpointer with "
+            'id_type="bigint" or "int".',
+        ],
+        "env": [
+            {"name": "SNOWFLAKE_EPOCH", "purpose": "Epoch in milliseconds for Snowflake ids."},
+            {
+                "name": "SNOWFLAKE_NODE_ID",
+                "purpose": "Node id for Snowflake ids. Give each machine a different one.",
+            },
+            {
+                "name": "SNOWFLAKE_WORKER_ID",
+                "purpose": "Worker id for Snowflake ids. Make it unique per process on a node.",
+            },
+            {
+                "name": "SNOWFLAKE_TIME_BITS",
+                "purpose": "Bits for the timestamp part of a Snowflake id.",
+            },
+            {"name": "SNOWFLAKE_NODE_BITS", "purpose": "Bits for the node part of a Snowflake id."},
+            {
+                "name": "SNOWFLAKE_WORKER_BITS",
+                "purpose": "Bits for the worker part of a Snowflake id.",
+            },
+            {
+                "name": "SNOWFLAKE_TOTAL_BITS",
+                "purpose": "Total bits in a Snowflake id. Defaults to 64.",
+            },
+        ],
+    },
+    {
+        "id": "thread_name_generator",
+        "title": "Thread naming",
+        "description": "How a new thread gets its title after its first run.",
+        "key": None,
+        "optional": False,
+        "widget": "thread_name_generator",
+        "choices": [
+            ["none", "None", "Threads are saved without a name."],
+            [
+                "random",
+                "Random name",
+                "A random two-word name, such as thoughtful-dialogue.",
+            ],
+            ["first_message", "First message", "The user's first message, cut to 60 characters."],
+        ],
+        "fields": [
+            {
+                "path": ["thread_name_generator"],
+                "managed": True,
+                "default": "none",
+                "label": "Thread name generator",
+                "type": "text",
+                "placeholder": "graph.titles:TitleGenerator",
+                "help": "Your own ThreadNameGenerator subclass, as module:attr.",
+            },
+        ],
+    },
+    {
+        "id": "store",
+        "title": "Memory store",
+        "description": "Long-term memory shared across threads.",
+        "key": None,
+        "optional": False,
+        "fields": [
+            {
+                "path": ["store"],
+                "label": "Memory store",
+                "type": "text",
+                "placeholder": "graph.dependencies:store",
+                "help": "module:attr of a BaseStore instance.",
+            },
+            {
+                "path": ["store_allow_tenant_mismatch"],
+                "label": "Allow tenant column mismatch",
+                "type": "bool",
+                "default": False,
+                "help": (
+                    "The server refuses to start under MODE=production (and warns otherwise) "
+                    "when this store and the checkpointer declare different tenant columns. "
+                    "Turn on only for a store that holds shared data, such as a knowledge base."
+                ),
+            },
+        ],
+    },
+    {
+        "id": "injectq",
+        "title": "Dependency injection",
+        "description": "Your own InjectQ container for tools and nodes.",
+        "key": None,
+        "optional": False,
+        "fields": [
+            {
+                "path": ["injectq"],
+                "label": "InjectQ container",
+                "type": "text",
+                "placeholder": "graph.dependencies:container",
+                "help": "module:attr of an InjectQ container.",
+            },
+        ],
+    },
+    {
+        "id": "remote_tools",
+        "title": "Remote tools",
+        "description": "Tools the model can call that run in the client, not on the server.",
+        "key": "remote_tools",
+        "optional": True,
+        "off_summary": "The model can only call tools that run on the server.",
+        "default": [],
+        "widget": "remote_tools",
+        "fields": [],
+    },
+    {
+        "id": "worker",
+        "title": "Worker (background tasks)",
+        "description": "The TaskIQ broker and result backend that run background tasks.",
+        "key": "worker",
+        "optional": True,
+        "off_summary": "No background worker is configured.",
+        "default": {"broker": {"type": "redis_stream"}},
+        "fields": [
+            {
+                "path": ["worker", "broker", "type"],
+                "label": "Broker type",
+                "type": "select",
+                "options": [
+                    ["redis_stream", "Redis Streams"],
+                    ["rabbitmq", "RabbitMQ"],
+                    ["kafka", "Kafka"],
+                    ["memory", "In memory (local only, no worker)"],
+                ],
+                "default": "redis_stream",
+            },
+            {
+                "path": ["worker", "broker", "url"],
+                "label": "Broker URL",
+                "type": "text",
+                "placeholder": "Redis: empty uses REDIS_URL",
+                "help": (
+                    "Redis Streams: empty uses REDIS_URL. RabbitMQ: amqp://user:pass@host:5672/ "
+                    "(required). Kafka: host:9092, the bootstrap servers (required). A value or a "
+                    "variable such as ${WORKER_REDIS_URL}."
+                ),
+            },
+            {
+                "path": ["worker", "result_backend", "type"],
+                "label": "Result backend type",
+                "type": "select",
+                "options": [["redis", "Redis"], ["memory", "In memory"]],
+                "default": "redis",
+            },
+            {
+                "path": ["worker", "result_backend", "url"],
+                "label": "Result backend URL",
+                "type": "text",
+                "placeholder": "Empty: the broker URL for Redis Streams, else REDIS_URL",
+                "help": "Empty: the broker URL for Redis Streams, else REDIS_URL",
+            },
+            {
+                "path": ["worker", "tasks"],
+                "label": "Task modules",
+                "type": "list",
+                "placeholder": "graph.tasks",
+                "help": "Module names or file globs that define your tasks.",
+            },
+            {
+                "path": ["worker", "result_ttl"],
+                "label": "Result TTL (seconds)",
+                "type": "number",
+                "exclusive_min": 0,
+                "step": 1,
+                "placeholder": "86400",
+                "help": "How long task results are kept.",
+            },
+            {
+                "path": ["worker", "retries"],
+                "label": "Retries",
+                "type": "number",
+                "min": 0,
+                "step": 1,
+                "placeholder": "3",
+                "help": "How many times a failed task is retried.",
+            },
+        ],
+    },
+    {
+        "id": "test",
+        "title": "Testing",
+        "description": "Defaults for 10xgraph test.",
+        "key": "test",
+        "optional": True,
+        "off_summary": "10xgraph test uses its built-in defaults.",
+        "default": {"path": "tests", "coverage": False},
+        "fields": [
+            {"path": ["test", "path"], "label": "Tests path", "type": "text"},
+            {"path": ["test", "coverage"], "label": "Coverage", "type": "bool", "default": False},
+            {
+                "path": ["test", "coverage_threshold"],
+                "label": "Coverage threshold (%)",
+                "type": "number",
+                "min": 0,
+                "step": 1,
+                "placeholder": "80",
+                "show_if": {"path": ["test", "coverage"], "equals": True},
+            },
+        ],
+    },
+    {
+        "id": "evaluation",
+        "title": "Evaluation",
+        "description": "Defaults for 10xgraph eval.",
+        "key": "evaluation",
+        "optional": True,
+        "off_summary": "10xgraph eval uses its built-in defaults.",
+        "default": {
+            "directory": "evals",
+            "output_dir": "eval_reports",
+            "threshold": 0.75,
+            "parallel": False,
+            "max_concurrency": 4,
+            "open_report": True,
+        },
+        "fields": [
+            {"path": ["evaluation", "directory"], "label": "Eval directory", "type": "text"},
+            {"path": ["evaluation", "output_dir"], "label": "Report directory", "type": "text"},
+            {
+                "path": ["evaluation", "threshold"],
+                "label": "Pass threshold",
+                "type": "number",
+                "min": 0,
+                "step": 0.05,
+                "help": "Between 0 and 1.",
+            },
+            {
+                "path": ["evaluation", "parallel"],
+                "label": "Run in parallel",
+                "type": "bool",
+                "default": False,
+            },
+            {
+                "path": ["evaluation", "max_concurrency"],
+                "label": "Max concurrency",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "show_if": {"path": ["evaluation", "parallel"], "equals": True},
+            },
+            {
+                "path": ["evaluation", "open_report"],
+                "label": "Open HTML report",
+                "type": "bool",
+                "default": True,
+                "help": "Open the HTML report in your browser when 10xgraph eval finishes.",
+            },
+        ],
+    },
+]
+
+_ENVIRONMENT: list[dict[str, Any]] = [
+    {
+        "title": "Mode and logging",
+        "vars": [
+            {
+                "name": "MODE",
+                "purpose": (
+                    "development or production. Production turns on stricter defaults, "
+                    "including the API docs being off."
+                ),
+            },
+            {"name": "LOG_LEVEL", "purpose": "Python log level such as INFO or DEBUG."},
+            {
+                "name": "STRICT_PRODUCTION_CHECKS",
+                "purpose": (
+                    "Refuse to start in production with wildcard ORIGINS or ALLOWED_HOST, or "
+                    "docs enabled. Unset means on in production; false only warns."
+                ),
+            },
+            {
+                "name": "STARTUP_CHECKS",
+                "purpose": (
+                    "Refuse to start while the checkpointer, the store or a required cache store "
+                    "is unreachable (the cache store only for token_revocation or rate_limit "
+                    "with fail_open false), in development and production. Defaults to true; "
+                    "false skips the check."
+                ),
+            },
+            {
+                "name": "STARTUP_CHECK_TIMEOUT_SECONDS",
+                "purpose": (
+                    "Seconds startup keeps retrying an unreachable backend before it gives up. "
+                    "Defaults to 30."
+                ),
+            },
+        ],
+    },
+    {
+        "title": "CORS and hosts",
+        "vars": [
+            {
+                "name": "ORIGINS",
+                "purpose": "Allowed CORS origins, comma-separated. Defaults to *.",
+            },
+            {
+                "name": "ALLOWED_HOST",
+                "purpose": "Comma-separated host names the server answers to. Defaults to *.",
+            },
+            {
+                "name": "CORS_ALLOW_CREDENTIALS",
+                "purpose": (
+                    "Let cross-origin requests carry cookies and auth headers. Defaults to "
+                    "true; production refuses it together with ORIGINS=*."
+                ),
+            },
+        ],
+    },
+    {
+        "title": "Paths and limits",
+        "vars": [
+            {
+                "name": "ROOT_PATH",
+                "purpose": "URL prefix when the app is served behind a proxy path.",
+            },
+            {
+                "name": "DOCS_PATH",
+                "purpose": "Swagger docs path. Empty turns them off; off by default in production.",
+            },
+            {
+                "name": "REDOCS_PATH",
+                "purpose": "ReDoc docs path. Empty turns them off; off by default in production.",
+            },
+            {
+                "name": "MAX_REQUEST_SIZE",
+                "purpose": "Largest request body in bytes. Defaults to 10 MB.",
+            },
+        ],
+    },
+    {
+        "title": "Security headers",
+        "vars": [
+            {
+                "name": "SECURITY_HEADERS_ENABLED",
+                "purpose": "Add security headers to every response. Defaults to true.",
+            },
+            {
+                "name": "HSTS_ENABLED",
+                "purpose": "Send Strict-Transport-Security. Defaults to true.",
+            },
+            {"name": "HSTS_MAX_AGE", "purpose": "HSTS max-age in seconds. Defaults to one year."},
+            {
+                "name": "HSTS_INCLUDE_SUBDOMAINS",
+                "purpose": "Add includeSubDomains to the HSTS header. Defaults to true.",
+            },
+            {
+                "name": "HSTS_PRELOAD",
+                "purpose": "Add preload to the HSTS header. Defaults to false.",
+            },
+            {"name": "FRAME_OPTIONS", "purpose": "X-Frame-Options value. Defaults to DENY."},
+            {
+                "name": "CONTENT_TYPE_OPTIONS",
+                "purpose": "X-Content-Type-Options value. Defaults to nosniff.",
+            },
+            {
+                "name": "REFERRER_POLICY",
+                "purpose": "Referrer-Policy value. Defaults to strict-origin-when-cross-origin.",
+            },
+            {
+                "name": "PERMISSIONS_POLICY",
+                "purpose": "Permissions-Policy value. Unset uses the built-in policy.",
+            },
+            {
+                "name": "CSP_POLICY",
+                "purpose": "Content-Security-Policy value. Unset uses the built-in policy.",
+            },
+        ],
+    },
+    {
+        "title": "Error tracking",
+        "vars": [
+            {
+                "name": "SENTRY_DSN",
+                "purpose": "Sentry project DSN. Error tracking is off without it.",
+            },
+            {
+                "name": "SENTRY_TRACES_SAMPLE_RATE",
+                "purpose": "Share of requests traced, 0 to 1. Defaults to 0.1.",
+            },
+            {
+                "name": "SENTRY_PROFILES_SAMPLE_RATE",
+                "purpose": "Share of requests profiled, 0 to 1. Defaults to 0.",
+            },
+        ],
+    },
+    {
+        "title": "Snowflake IDs (optional)",
+        "note": (
+            "Only needed if you use SnowFlakeIdGenerator with no arguments "
+            "(needs the snowflakekit extra). Otherwise leave these unset."
+        ),
+        "vars": [
+            {
+                "name": "SNOWFLAKE_EPOCH",
+                "purpose": "Epoch in milliseconds for Snowflake ids.",
+            },
+            {
+                "name": "SNOWFLAKE_NODE_ID",
+                "purpose": "Node id for Snowflake ids. Give each machine a different one.",
+            },
+            {
+                "name": "SNOWFLAKE_WORKER_ID",
+                "purpose": "Worker id for Snowflake ids. Make it unique per process on a node.",
+            },
+            {
+                "name": "SNOWFLAKE_TIME_BITS",
+                "purpose": "Bits for the timestamp part of a Snowflake id.",
+            },
+            {"name": "SNOWFLAKE_NODE_BITS", "purpose": "Bits for the node part of a Snowflake id."},
+            {
+                "name": "SNOWFLAKE_WORKER_BITS",
+                "purpose": "Bits for the worker part of a Snowflake id.",
+            },
+            {
+                "name": "SNOWFLAKE_TOTAL_BITS",
+                "purpose": "Total bits in a Snowflake id. Defaults to 64.",
+            },
+        ],
+    },
+]
+
+
+def build_schema() -> dict[str, Any]:
+    """Return a fresh, JSON-serialisable copy of the editor schema."""
+    return {
+        "docs_url": DOCS_URL,
+        "sections": copy.deepcopy(_SECTIONS),
+        "environment": copy.deepcopy(_ENVIRONMENT),
+    }
+
+
+def section_for_key(key: str) -> str:
+    """Map a top-level config key to the id of the section that renders it."""
+    if key == "authorization":  # removed key; its error is shown on the Auth tab
+        return "auth"
+    for section in _SECTIONS:
+        if section["key"] == key:
+            return section["id"]
+        if section["key"] is None and any(f["path"][0] == key for f in section["fields"]):
+            return section["id"]
+    return "core"

@@ -1,0 +1,41 @@
+{
+  "agent": "graph.agent:app",
+  "env": ".env",
+  "auth": {
+    "method": "jwt"
+  },
+  "remote_tools": [],
+  "ag_ui": {
+    "enabled": false,
+    "allow_client_tools": false
+  },
+  "thread_name_generator": "first_message",
+  "injectq": "graph.agent:container",
+  "id_generator": "uuid",
+  "cache_store": {
+    "type": "redis",
+    "rate_limit": {
+      "enabled": true,
+      "requests": 100,
+      "window": 60,
+      "by": "user",
+      "trusted_proxy_headers": false,
+      "fail_open": false,
+      "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"]
+    },
+    "token_revocation": true
+  },
+  "test": {
+    "path": "tests",
+    "coverage": true,
+    "coverage_threshold": 70
+  },
+  "evaluation": {
+    "directory": "evals",
+    "output_dir": "eval_reports",
+    "threshold": 0.75,
+    "parallel": false,
+    "max_concurrency": 4,
+    "timestamp_files": true
+  }
+}
