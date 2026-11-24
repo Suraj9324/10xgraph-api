@@ -72,7 +72,7 @@ dependencies = [
     "typer>=0.17,<1.0",
     "python-dotenv>=1.0,<2",
     "questionary>=2.0,<3",
-    "rich>=14.0,<15",
+    "rich>=14.0,<16",
 ]
 
 [project.urls]
