@@ -450,6 +450,6 @@ dev = [
     "ag-ui-protocol>=1.0,<2",
     # The production worker class (uvicorn_worker.py) and its shutdown tests import these;
     # same ranges the generated Dockerfile installs.
-    "gunicorn>=23,<27",
+    "gunicorn>=23,<28",
     "uvicorn-worker>=0.4,<1",
 ]
