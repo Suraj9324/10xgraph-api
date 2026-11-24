@@ -146,7 +146,7 @@ ag-ui = [
 # WebSocket streaming (/v1/graph/ws) and realtime audio (/v1/graph/live). Uvicorn needs a
 # WebSocket library to serve them; set "websocket": {"enabled": false} to run without one.
 websocket = [
-    "websockets>=13.0,<17",
+    "websockets>=13.0,<18",
 ]
 
 [project.scripts]
